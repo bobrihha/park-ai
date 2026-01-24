@@ -333,6 +333,66 @@ async def chat(request: ChatRequest):
                     db.commit()
                     db.close()
                     return ChatResponse(reply=response, session_id=session_id)
+
+            # Если дата и дети уже есть, но телефона нет — спрашиваем телефон
+            if lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
+                response = "📱 Оставьте номер телефона для связи:"
+                bot_message = Message(session_id=session.id, role="assistant", content=response)
+                db.add(bot_message)
+                db.commit()
+                db.close()
+                return ChatResponse(reply=response, session_id=session_id)
+
+            # Если дата, дети и телефон есть — создаём сделку (если ещё нет) и задаём короткие вопросы
+            if lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and lead_data.get("phone"):
+                if current_lead and not current_lead.amocrm_deal_id:
+                    try:
+                        from core.amocrm import send_lead_to_amocrm
+                        from core.lead_service import save_amocrm_deal_id
+                        
+                        lead_dict = lead_to_dict(current_lead)
+                        lead_dict["source"] = "web"
+                        deal_id, contact_id = await send_lead_to_amocrm(
+                            lead_data=lead_dict,
+                            telegram_id=None,
+                            username=None
+                        )
+                        if deal_id:
+                            save_amocrm_deal_id(current_lead.id, str(deal_id))
+                            current_lead.amocrm_deal_id = str(deal_id)
+                            msg_text = format_lead_message("web", session_id, lead_dict)
+                            await send_to_birthday_channel(msg_text)
+                            mark_lead_sent_to_manager(current_lead.id)
+                    except Exception as e:
+                        logger.error(f"Failed to send web lead to AmoCRM: {e}")
+                
+                # Короткие вопросы по формату / времени / имени
+                format_value = (lead_data.get("format") or "").strip().lower()
+                is_room = "комнат" in format_value or "room" in format_value
+                
+                if not format_value:
+                    response = "🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
+                    bot_message = Message(session_id=session.id, role="assistant", content=response)
+                    db.add(bot_message)
+                    db.commit()
+                    db.close()
+                    return ChatResponse(reply=response, session_id=session_id)
+                
+                if is_room and not lead_data.get("time"):
+                    response = "⏰ На какое время? Слоты: 10:30, 14:30, 18:30"
+                    bot_message = Message(session_id=session.id, role="assistant", content=response)
+                    db.add(bot_message)
+                    db.commit()
+                    db.close()
+                    return ChatResponse(reply=response, session_id=session_id)
+                
+                if not lead_data.get("customer_name"):
+                    response = "👤 Как к вам обращаться?"
+                    bot_message = Message(session_id=session.id, role="assistant", content=response)
+                    db.add(bot_message)
+                    db.commit()
+                    db.close()
+                    return ChatResponse(reply=response, session_id=session_id)
         # ============ КОНЕЦ BIRTHDAY DATE STEP ============
         
         # Проверяем запрос живого менеджера ПЕРЕД генерацией ответа

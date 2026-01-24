@@ -2257,8 +2257,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Проверяем: нужно подтвердить телефон для нового бронирования?
             pending_phone = context.user_data.get("pending_phone_confirm")
             
-            # Если есть pending телефон И только что получили kids_count — спрашиваем
-            if pending_phone and extracted and extracted.get("kids_count") and not lead_data.get("phone"):
+            # Если есть pending телефон И уже получили kids_count — спрашиваем
+            if pending_phone and lead_data.get("kids_count") and not lead_data.get("phone"):
                 keyboard = [
                     [InlineKeyboardButton(f"✅ Да, использовать {pending_phone}", callback_data="confirm_phone_yes")],
                     [InlineKeyboardButton("📱 Указать другой номер", callback_data="confirm_phone_no")]
@@ -2271,6 +2271,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=reply_markup
                 )
                 return  # Ждём выбора
+            
+            # Если дата и дети уже есть, но телефона нет — спрашиваем телефон
+            if lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone") and not pending_phone:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="📱 Оставьте номер телефона для связи:"
+                )
+                return
             
             # РАННЯЯ ОТПРАВКА В CRM: Как только есть телефон — создаём сделку
             
@@ -2323,6 +2331,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Формируем lead_data для передачи в agent (добавляем first_name для имени из профиля)
             lead_data["first_name"] = user.first_name
+
+            # Если есть дата + дети + телефон — ведём короткими вопросами
+            if lead_data.get("event_date") and lead_data.get("kids_count") and lead_data.get("phone"):
+                format_value = (lead_data.get("format") or "").strip().lower()
+                is_room = "комнат" in format_value or "room" in format_value
+                is_restaurant = "ресторан" in format_value or "restaurant" in format_value
+
+                if not format_value:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
+                    )
+                    return
+
+                if is_room and not lead_data.get("time"):
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="⏰ На какое время? Слоты: 10:30, 14:30, 18:30"
+                    )
+                    return
+
+                if not lead_data.get("customer_name"):
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="👤 Как к вам обращаться?"
+                    )
+                    return
         
         # Проверяем статус сделки в AmoCRM
         deal_in_work = False

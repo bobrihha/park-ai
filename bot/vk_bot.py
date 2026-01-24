@@ -1121,6 +1121,11 @@ def create_vk_bot(token: str, group_id: int):
                     if date_obj:
                         await message.answer(build_birthday_date_question(date_obj))
                         return
+
+                # Если дата и дети уже есть, но телефона нет — спрашиваем телефон
+                if lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
+                    await message.answer("📱 Оставьте номер телефона для связи:")
+                    return
                 
                 # Проверяем валидность телефона (минимум 10 цифр)
                 phone = lead_data.get("phone", "")
@@ -1185,6 +1190,23 @@ def create_vk_bot(token: str, group_id: int):
                 
                 # Формируем lead_data для передачи в agent (добавляем first_name для имени из профиля)
                 lead_data["first_name"] = vk_fname
+
+                # Если есть дата + дети + телефон — ведём короткими вопросами
+                if lead_data.get("event_date") and lead_data.get("kids_count") and lead_data.get("phone"):
+                    format_value = (lead_data.get("format") or "").strip().lower()
+                    is_room = "комнат" in format_value or "room" in format_value
+
+                    if not format_value:
+                        await message.answer("🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?")
+                        return
+
+                    if is_room and not lead_data.get("time"):
+                        await message.answer("⏰ На какое время? Слоты: 10:30, 14:30, 18:30")
+                        return
+
+                    if not lead_data.get("customer_name"):
+                        await message.answer("👤 Как к вам обращаться?")
+                        return
             
             # Проверяем статус сделки в AmoCRM
             deal_in_work = False
