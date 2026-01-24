@@ -1156,7 +1156,7 @@ def create_vk_bot(token: str, group_id: int):
                     pending_phone = session.lead_data.get("pending_phone_confirm")
                     pending_name = session.lead_data.get("pending_customer_name")
 
-                if pending_phone and lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
+                if pending_phone and lead_data.get("event_date") and lead_data.get("kids_count"):
                     phone_display = f"+7 {pending_phone[-10:-7]} {pending_phone[-7:-4]}-{pending_phone[-4:-2]}-{pending_phone[-2:]}" if len(pending_phone) >= 10 else pending_phone
                     keyboard = (
                         Keyboard(inline=True)

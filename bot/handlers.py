@@ -2304,7 +2304,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pending_phone = context.user_data.get("pending_phone_confirm")
             
             # Если есть pending телефон И уже получили kids_count — спрашиваем
-            if pending_phone and lead_data.get("kids_count") and not lead_data.get("phone"):
+            if pending_phone and lead_data.get("kids_count"):
                 keyboard = [
                     [InlineKeyboardButton(f"✅ Да, использовать {pending_phone}", callback_data="confirm_phone_yes")],
                     [InlineKeyboardButton("📱 Указать другой номер", callback_data="confirm_phone_no")]
