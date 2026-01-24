@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 from datetime import datetime, timedelta, date
+from typing import Optional
 
 def get_prices_from_knowledge(park_id: str = "nn") -> dict:
     """
@@ -318,3 +319,37 @@ def build_birthday_date_question(d: date, prices: dict | None = None) -> str:
         f"📅 {date_str} — это {weekday}, цена детского билета {price} ₽.\n\n"
         "👶 Сколько детей будет всего, включая именинника?"
     )
+
+
+def parse_kids_count(text: str, max_count: int = 60) -> Optional[int]:
+    """Extract kids count from user message (short numeric responses)."""
+    if not text:
+        return None
+
+    t = text.lower().strip()
+
+    # Avoid time like 10:30
+    if re.search(r"\b\d{1,2}[:.]\d{2}\b", t):
+        return None
+
+    # Avoid phone-like numbers (10-11 digits)
+    if re.search(r"\b[789]\d{9,10}\b", t):
+        return None
+
+    # Pure digits (1-2 digits)
+    if re.fullmatch(r"\d{1,2}", t):
+        n = int(t)
+        return n if 1 <= n <= max_count else None
+
+    # Patterns with "дет" or "реб"
+    m = re.search(r"(\d{1,2})\s*(дет|реб)", t)
+    if m:
+        n = int(m.group(1))
+        return n if 1 <= n <= max_count else None
+
+    m = re.search(r"(дет|реб)[^\d]{0,10}(\d{1,2})", t)
+    if m:
+        n = int(m.group(2))
+        return n if 1 <= n <= max_count else None
+
+    return None

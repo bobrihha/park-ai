@@ -19,7 +19,7 @@ from core.rag import RAGSystem
 from core.intent_router import detect_intent
 from core.amocrm import amocrm_client
 from core.messages import BIRTHDAY_WELCOME_MESSAGE
-from core.utils import parse_user_date, format_date_ru, build_birthday_date_question
+from core.utils import parse_user_date, format_date_ru, build_birthday_date_question, parse_kids_count
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message, Lead
 from core.lead_service import (
@@ -318,6 +318,12 @@ async def chat(request: ChatRequest):
                     lead_data = lead_to_dict(current_lead)
 
             # Если дата есть, но детей ещё нет — задаём следующий вопрос с ценой
+            if lead_data and lead_data.get("event_date") and not lead_data.get("kids_count"):
+                kids_count = parse_kids_count(request.message)
+                if kids_count and current_lead:
+                    current_lead = update_lead_from_data(current_lead.id, {"kids_count": kids_count})
+                    lead_data = lead_to_dict(current_lead)
+
             if lead_data and lead_data.get("event_date") and not lead_data.get("kids_count"):
                 date_obj = parse_user_date(lead_data["event_date"]) or parse_user_date(request.message)
                 if date_obj:
