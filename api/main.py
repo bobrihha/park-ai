@@ -53,6 +53,13 @@ from core.notifications import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _refresh_lead(db, lead: Lead | None) -> Lead | None:
+    """Reload lead in текущей DB-сессии to avoid detached instances."""
+    if not lead:
+        return None
+    return db.query(Lead).filter(Lead.id == lead.id).first()
+
 app = FastAPI(
     title="Jungle City Chat API",
     description="API для чат-виджета на сайте nn.jucity.ru",
@@ -232,6 +239,7 @@ async def chat(request: ChatRequest):
         
         if session.intent == "birthday":
             current_lead = get_or_create_lead(session_id, source="web", park_id="nn")
+            current_lead = _refresh_lead(db, current_lead)
             
             # Используем данные из регистрации (если есть)
             if session.lead_data and session.lead_data.get("web_registered"):
@@ -239,16 +247,20 @@ async def chat(request: ChatRequest):
                     current_lead = update_lead_from_data(current_lead.id, {
                         "customer_name": session.lead_data.get("customer_name")
                     })
+                    current_lead = _refresh_lead(db, current_lead)
                 if not current_lead.phone and session.lead_data.get("phone"):
                     current_lead = update_lead_from_data(current_lead.id, {
                         "phone": session.lead_data.get("phone")
                     })
+                    current_lead = _refresh_lead(db, current_lead)
             
             # Также используем данные из запроса (если пользователь указал новые)
             if request.user_name and not current_lead.customer_name:
                 current_lead = update_lead_from_data(current_lead.id, {"customer_name": request.user_name})
+                current_lead = _refresh_lead(db, current_lead)
             if request.user_phone and not current_lead.phone:
                 current_lead = update_lead_from_data(current_lead.id, {"phone": request.user_phone})
+                current_lead = _refresh_lead(db, current_lead)
             
             # Извлекаем данные из сообщения
             extracted = agent.extract_lead_data(request.message, {})
@@ -269,6 +281,7 @@ async def chat(request: ChatRequest):
                     extracted.pop("extras", None)
             if extracted:
                 current_lead = update_lead_from_data(current_lead.id, extracted)
+                current_lead = _refresh_lead(db, current_lead)
             lead_data = lead_to_dict(current_lead)
         
         # ============ ЖАЛОБЫ — обработка жалоб на обслуживание ============
@@ -344,6 +357,7 @@ async def chat(request: ChatRequest):
             start_new_booking = any(k in text_lower for k in start_keywords) and not any(k in text_lower for k in change_keywords)
             if start_new_booking and current_lead:
                 current_lead = force_create_new_lead(session_id, park_id="nn", source="web")
+                current_lead = _refresh_lead(db, current_lead)
                 lead_data = lead_to_dict(current_lead)
                 # Сбросим служебные флаги, сохраняя данные регистрации
                 preserved = {}
@@ -415,6 +429,7 @@ async def chat(request: ChatRequest):
             if parsed_date and current_lead:
                 normalized_date = format_date_ru(parsed_date, include_year=False)
                 current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
+                current_lead = _refresh_lead(db, current_lead)
                 lead_data = lead_to_dict(current_lead)
                 session.lead_data = session.lead_data or {}
                 session.lead_data["force_kids"] = True
@@ -433,6 +448,7 @@ async def chat(request: ChatRequest):
                 kids_count = parse_kids_count(request.message)
                 if kids_count and current_lead:
                     current_lead = update_lead_from_data(current_lead.id, {"kids_count": kids_count})
+                    current_lead = _refresh_lead(db, current_lead)
                     lead_data = lead_to_dict(current_lead)
                     if session.lead_data:
                         session.lead_data.pop("force_kids", None)
@@ -454,6 +470,7 @@ async def chat(request: ChatRequest):
                 phone_candidate = extract_phone_from_message(request.message)
                 if phone_candidate and current_lead:
                     current_lead = update_lead_from_data(current_lead.id, {"phone": phone_candidate})
+                    current_lead = _refresh_lead(db, current_lead)
                     lead_data = lead_to_dict(current_lead)
                     session.lead_data = session.lead_data or {}
                     session.lead_data["phone_confirmed"] = True
@@ -465,6 +482,7 @@ async def chat(request: ChatRequest):
                 format_candidate = extract_format_from_message(request.message)
                 if format_candidate and current_lead and not lead_data.get("format"):
                     current_lead = update_lead_from_data(current_lead.id, {"format": format_candidate})
+                    current_lead = _refresh_lead(db, current_lead)
                     lead_data = lead_to_dict(current_lead)
 
             # Если сделка уже есть — синхронизируем поля после обновлений
