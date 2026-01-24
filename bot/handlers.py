@@ -655,28 +655,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "customer_name": found_name
                     })
                     
-                    # Сохраняем телефон и lead_id в context для подтверждения
+                    # Сохраняем телефон и lead_id в context для подтверждения ПОСЛЕ количества детей
                     context.user_data["pending_phone_confirm"] = found_phone
                     context.user_data["pending_lead_id"] = current_lead.id
                     context.user_data["pending_customer_name"] = found_name
                     
-                    logger.info(f"Found returning customer: {found_name}, phone={found_phone}, asking for confirmation")
-                    
-                    # Спрашиваем подтверждение телефона
-                    phone_display = f"+7 {found_phone[-10:-7]} {found_phone[-7:-4]}-{found_phone[-4:-2]}-{found_phone[-2:]}" if len(found_phone) >= 10 else found_phone
-                    keyboard = [
-                        [InlineKeyboardButton(f"✅ Да, {phone_display}", callback_data="confirm_returning_phone_yes")],
-                        [InlineKeyboardButton("📱 Указать другой номер", callback_data="confirm_returning_phone_no")]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    
-                    greeting = f"Рады снова видеть вас, {found_name}! 💚\n\n" if found_name else "Рады снова вас видеть! 💚\n\n"
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"{greeting}📱 Актуален ли этот номер телефона для связи?\n\n{phone_display}",
-                        reply_markup=reply_markup
-                    )
-                    return  # Ждём подтверждения
+                    logger.info(f"Found returning customer: {found_name}, phone={found_phone}, will confirm after kids count")
             
             # Если контакт не найден или нет телефона — стандартный флоу
             # Отправляем фото с текстом
@@ -887,10 +871,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Очищаем pending
             context.user_data.pop("pending_phone_confirm", None)
             context.user_data.pop("pending_lead_id", None)
-            
+            context.user_data.pop("pending_customer_name", None)
+
+            # Уведомляем менеджеров о заявке
+            try:
+                msg_text = format_lead_message("telegram", str(update.effective_user.id), lead_to_dict(get_or_create_lead(update.effective_user.id)))
+                await send_to_birthday_channel(msg_text)
+                mark_lead_sent_to_manager(pending_lead_id)
+            except Exception as e:
+                logger.error(f"Failed to notify managers after phone confirm: {e}")
+
+            # Переходим к следующему шагу (короткие вопросы)
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="✅ Отлично! Заявка отправлена феям праздников! 🧚‍♀️\n\nДавайте выберем формат праздника? 💚"
+                text="🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
             )
         
         elif query.data == "confirm_phone_no":
@@ -929,13 +923,42 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("pending_lead_id", None)
             context.user_data.pop("pending_customer_name", None)
             
-            # Отправляем стандартное сообщение о бронировании
-            caption = BIRTHDAY_WELCOME_MESSAGE
-            with open(IMAGES["birthday"], 'rb') as photo_file:
-                await context.bot.send_photo(
+            # Уведомляем менеджеров о заявке
+            try:
+                msg_text = format_lead_message("telegram", str(update.effective_user.id), lead_to_dict(get_or_create_lead(update.effective_user.id)))
+                await send_to_birthday_channel(msg_text)
+                mark_lead_sent_to_manager(pending_lead_id)
+            except Exception as e:
+                logger.error(f"Failed to notify managers after returning phone confirm: {e}")
+
+            # Дальше ведём по короткому сценарию
+            lead = get_or_create_lead(update.effective_user.id)
+            lead_data = lead_to_dict(lead)
+            if not lead_data.get("event_date"):
+                # Если даты ещё нет — начинаем с приветствия
+                caption = BIRTHDAY_WELCOME_MESSAGE
+                with open(IMAGES["birthday"], 'rb') as photo_file:
+                    await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=photo_file,
+                        caption=caption
+                    )
+            elif not lead_data.get("kids_count"):
+                date_obj = parse_user_date(lead_data["event_date"])
+                if date_obj:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=build_birthday_date_question(date_obj)
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="👶 Сколько детей будет всего, включая именинника?"
+                    )
+            else:
+                await context.bot.send_message(
                     chat_id=chat_id,
-                    photo=photo_file,
-                    caption=caption
+                    text="🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
                 )
         
         elif query.data == "confirm_returning_phone_no":

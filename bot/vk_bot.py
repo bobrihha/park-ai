@@ -274,28 +274,16 @@ def create_vk_bot(token: str, group_id: int):
                 found_phone = contact_info.get("phone")
                 found_name = contact_info.get("name")
                 
-                # Если есть телефон — спрашиваем подтверждение
+                # Если есть телефон — сохраняем для подтверждения ПОСЛЕ количества детей
                 if found_phone:
-                    phone_display = f"+7 {found_phone[-10:-7]} {found_phone[-7:-4]}-{found_phone[-4:-2]}-{found_phone[-2:]}" if len(found_phone) >= 10 else found_phone
-                    
-                    keyboard = (
-                        Keyboard(inline=True)
-                        .add(Text(f"✅ Да, {phone_display}", payload={"cmd": "confirm_phone_yes", "phone": found_phone, "name": found_name or ""}), color=KeyboardButtonColor.POSITIVE)
-                        .row()
-                        .add(Text("📱 Указать другой", payload={"cmd": "confirm_phone_no"}), color=KeyboardButtonColor.SECONDARY)
-                    ).get_json()
-                    
-                    greeting = f"Рады снова видеть вас, {found_name}! 💚" if found_name else "Рады снова вас видеть! 💚"
-                    await message.answer(
-                        f"{greeting}\n\n📱 Актуален ли этот номер телефона для связи?\n{phone_display}",
-                        keyboard=keyboard
-                    )
-                    
-                    # Обновляем интент
                     session = get_or_create_session(db, user_id, "vk")
                     session.intent = "birthday"
+                    session.lead_data = session.lead_data or {}
+                    session.lead_data["pending_phone_confirm"] = found_phone
+                    if found_name:
+                        session.lead_data["pending_customer_name"] = found_name
+                    flag_modified(session, "lead_data")
                     db.commit()
-                    return
 
             # 3. Если нет активной заявки и не нашли контакт — стандартный старт
             session = get_or_create_session(db, user_id, "vk")
@@ -375,19 +363,48 @@ def create_vk_bot(token: str, group_id: int):
                 # Инициализируем сессию birthday
                 session = get_or_create_session(db, user_id, "vk")
                 session.intent = "birthday"
+                # Очищаем pending телефон
+                session.lead_data = session.lead_data or {}
+                session.lead_data.pop("pending_phone_confirm", None)
+                session.lead_data.pop("pending_customer_name", None)
+                flag_modified(session, "lead_data")
                 db.commit()
                 
-                await message.answer("✅ Телефон подтвержден!\n\n📅 На какую дату планируете праздник?")
+                # Создаём сделку в AmoCRM и уведомляем менеджеров (не сообщаем клиенту)
+                try:
+                    lead_dict = lead_to_dict(lead)
+                    lead_dict["source"] = "vk"
+                    if name:
+                        lead_dict["customer_name"] = name
+                    result = await send_lead_to_amocrm(
+                        lead_dict,
+                        telegram_id=None,
+                        username=None,
+                        vk_id=user_id
+                    )
+                    if result and result[0]:
+                        amocrm_deal_id, amocrm_contact_id = result
+                        save_amocrm_deal_id(lead.id, str(amocrm_deal_id))
+                        msg_text = format_lead_message("vk", str(user_id), lead_dict)
+                        await send_to_managers(msg_text)
+                        mark_lead_sent_to_manager(lead.id)
+                except Exception as e:
+                    logger.error(f"Failed to send VK lead after phone confirm: {e}")
+
+                # Переходим к следующему шагу
+                await message.answer("🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?")
                 
             elif cmd == "confirm_phone_no":
-                # Не подтвердил -> Стандартный флоу (спросим телефон позже)
+                # Не подтвердил -> просим указать другой номер
                 session = get_or_create_session(db, user_id, "vk")
                 session.intent = "birthday"
-                session.lead_data = {}
+                session.lead_data = session.lead_data or {}
+                session.lead_data.pop("pending_phone_confirm", None)
+                session.lead_data.pop("pending_customer_name", None)
+                flag_modified(session, "lead_data")
                 db.commit()
                 
-                await message.answer("Понял, укажем другой номер в процессе. 👌")
-                await send_birthday_intro(message)
+                await message.answer("📱 Укажите, пожалуйста, ваш номер телефона для связи:")
 
             elif cmd.startswith("change_"):
                 # cmd формат: change_{lead_id}_{action}
@@ -1121,6 +1138,29 @@ def create_vk_bot(token: str, group_id: int):
                     if date_obj:
                         await message.answer(build_birthday_date_question(date_obj))
                         return
+
+                # Если есть сохранённый телефон из AmoCRM — подтверждаем его ПОСЛЕ детей
+                pending_phone = None
+                pending_name = None
+                if session.lead_data:
+                    pending_phone = session.lead_data.get("pending_phone_confirm")
+                    pending_name = session.lead_data.get("pending_customer_name")
+
+                if pending_phone and lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
+                    phone_display = f"+7 {pending_phone[-10:-7]} {pending_phone[-7:-4]}-{pending_phone[-4:-2]}-{pending_phone[-2:]}" if len(pending_phone) >= 10 else pending_phone
+                    keyboard = (
+                        Keyboard(inline=True)
+                        .add(Text(f"✅ Да, {phone_display}", payload={"cmd": "confirm_phone_yes", "phone": pending_phone, "name": pending_name or ""}), color=KeyboardButtonColor.POSITIVE)
+                        .row()
+                        .add(Text("📱 Указать другой", payload={"cmd": "confirm_phone_no"}), color=KeyboardButtonColor.SECONDARY)
+                    ).get_json()
+                    
+                    greeting = f"Рады снова видеть вас, {pending_name}! 💚\n\n" if pending_name else ""
+                    await message.answer(
+                        f"{greeting}📱 Актуален ли этот номер телефона для связи?\n{phone_display}",
+                        keyboard=keyboard
+                    )
+                    return
 
                 # Если дата и дети уже есть, но телефона нет — спрашиваем телефон
                 if lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
