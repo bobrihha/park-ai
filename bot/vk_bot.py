@@ -1142,8 +1142,8 @@ def create_vk_bot(token: str, group_id: int):
                             flag_modified(session, "lead_data")
                             db.commit()
 
-                # Если дата есть, но детей всё ещё нет — задаём следующий вопрос с ценой
-                if lead_data.get("event_date") and not lead_data.get("kids_count"):
+                # Если дата есть, но детей всё ещё нет (или мы форсим сбор) — задаём следующий вопрос с ценой
+                if lead_data.get("event_date") and (force_kids or not lead_data.get("kids_count")):
                     date_obj = parse_user_date(lead_data["event_date"]) or parse_user_date(message_text)
                     if date_obj:
                         await message.answer(build_birthday_date_question(date_obj))

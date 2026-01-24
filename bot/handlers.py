@@ -2289,8 +2289,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     lead_data = lead_to_dict(current_lead)
                     context.user_data.pop("force_kids", None)
 
-            # Если дата есть, но детей всё ещё нет — задаём следующий вопрос с ценой
-            if lead_data.get("event_date") and not lead_data.get("kids_count"):
+            # Если дата есть, но детей всё ещё нет (или мы форсим сбор) — задаём следующий вопрос с ценой
+            if lead_data.get("event_date") and (force_kids or not lead_data.get("kids_count")):
                 date_obj = parse_user_date(lead_data["event_date"]) or parse_user_date(message_text)
                 if date_obj:
                     response_text = build_birthday_date_question(date_obj)

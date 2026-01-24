@@ -336,7 +336,7 @@ async def chat(request: ChatRequest):
                         session.lead_data.pop("force_kids", None)
                         db.commit()
 
-            if lead_data and lead_data.get("event_date") and not lead_data.get("kids_count"):
+            if lead_data and lead_data.get("event_date") and (force_kids or not lead_data.get("kids_count")):
                 date_obj = parse_user_date(lead_data["event_date"]) or parse_user_date(request.message)
                 if date_obj:
                     response = build_birthday_date_question(date_obj)
