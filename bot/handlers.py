@@ -131,8 +131,6 @@ async def prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /birthday — запуск бронирования ДР."""
     user = update.effective_user
-    prices = get_prices_from_knowledge()
-    
     db = SessionLocal()
     try:
         # 1. Проверяем, есть ли АКТИВНАЯ сделка в CRM (amocrm_deal_id != None)
@@ -199,21 +197,9 @@ async def birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
     
-    # Стандартное приветствие для НОВОЙ заявки
+    # Стандартное приветствие для НОВОЙ заявки (единое с web/VK)
     await update.message.reply_text(
-        "🎉 <b>День рождения в Джунгли Сити!</b>\n\n"
-        "Что входит (от 6 детей):\n"
-        "✅ Комната на 3 часа — БЕСПЛАТНО\n"
-        "✅ Именинник — БЕСПЛАТНО (только при 7+ детях!)\n"
-        "✅ Взрослые — БЕСПЛАТНО\n"
-        "✅ Безлимит на все аттракционы весь день\n\n"
-        f"<b>Цены на билеты:</b>\n"
-        f"• Будни (вт-пт): {prices['weekday']} ₽\n"
-        f"• Выходные: {prices['weekend']} ₽\n"
-        f"• Понедельник: {prices['monday']} ₽\n\n"
-        "ℹ️ Если детей меньше 7 — можно забронировать столик в ресторане (именинник со скидкой 50% на вход)\n\n"
-        "Чтобы рассчитать и забронировать — ответьте:\n"
-        "📅 <b>На какую дату планируете праздник?</b>",
+        BIRTHDAY_WELCOME_MESSAGE,
         parse_mode="HTML"
     )
 
