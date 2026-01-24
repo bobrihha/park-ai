@@ -37,7 +37,8 @@ from core.lead_service import (
     get_or_create_lead,
     update_lead_from_data,
     mark_lead_sent_to_manager,
-    lead_to_dict
+    lead_to_dict,
+    force_create_new_lead,
 )
 from core.notifications import (
     send_to_managers,
@@ -335,18 +336,52 @@ async def chat(request: ChatRequest):
 
         # ============ BIRTHDAY DATE STEP — фиксированный вопрос про детей ============
         if session.intent == "birthday":
+            # --- Если пользователь явно хочет начать новую бронь — создаём новый lead ---
+            text_lower = request.message.lower().strip()
+            change_keywords = ["изменить", "перенести", "поменять", "другую дату", "сменить"]
+            start_keywords = ["хочу организовать", "хочу забронировать", "забронировать праздник", "организовать день рождения", "хочу праздник"]
+            start_new_booking = any(k in text_lower for k in start_keywords) and not any(k in text_lower for k in change_keywords)
+            if start_new_booking and current_lead and (current_lead.event_date or current_lead.kids_count):
+                current_lead = force_create_new_lead(session_id, park_id="nn", source="web")
+                lead_data = lead_to_dict(current_lead)
+                # Сбросим служебные флаги, сохраняя данные регистрации
+                preserved = {}
+                if session.lead_data and session.lead_data.get("web_registered"):
+                    preserved = {
+                        "web_registered": True,
+                        "customer_name": session.lead_data.get("customer_name"),
+                        "phone": session.lead_data.get("phone"),
+                    }
+                session.lead_data = preserved
+                flag_modified(session, "lead_data")
+                db.commit()
+
             # --- Обработка подтверждения телефона (web) ---
-            if session.lead_data and session.lead_data.get("pending_phone_confirm"):
+            last_bot_message = ""
+            for msg in reversed(history):
+                if msg.role == "assistant":
+                    last_bot_message = (msg.content or "").lower()
+                    break
+            asked_phone_confirm = "актуален ли этот номер" in last_bot_message
+
+            def _is_yes(t: str) -> bool:
+                return bool(re.search(r"\bда\b|ага|конечно|верно|правильно|ок\b|окей", t))
+
+            def _is_no(t: str) -> bool:
+                return bool(re.search(r"\bнет\b|неа|неверно|неправильно", t))
+
+            phone_confirmed_override = False
+
+            if (session.lead_data and session.lead_data.get("pending_phone_confirm")) or asked_phone_confirm:
                 pending_phone = session.lead_data.get("pending_phone_confirm")
                 text = request.message.strip().lower()
-                yes_words = ["да", "да!", "ага", "конечно", "верно", "правильно", "ок", "окей"]
-                no_words = ["нет", "неа", "не", "неверно", "неправильно"]
-                if text in yes_words:
+                if _is_yes(text):
                     session.lead_data["phone_confirmed"] = True
                     session.lead_data.pop("pending_phone_confirm", None)
                     flag_modified(session, "lead_data")
                     db.commit()
-                elif text in no_words:
+                    phone_confirmed_override = True
+                elif _is_no(text):
                     session.lead_data.pop("pending_phone_confirm", None)
                     session.lead_data["phone_confirmed"] = False
                     flag_modified(session, "lead_data")
@@ -423,7 +458,7 @@ async def chat(request: ChatRequest):
                     logger.error(f"Failed to update AmoCRM deal (web): {e}")
 
             session.lead_data = session.lead_data or {}
-            phone_confirmed = bool(session.lead_data.get("phone_confirmed"))
+            phone_confirmed = phone_confirmed_override or bool(session.lead_data.get("phone_confirmed"))
             pending_phone = session.lead_data.get("pending_phone_confirm")
             phone_value = lead_data.get("phone")
             effective_phone = phone_value if phone_confirmed else None
