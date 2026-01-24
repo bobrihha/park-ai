@@ -21,6 +21,7 @@ from core.utils import (
     should_defer_phone_request,
     extract_phone_from_message,
     extract_format_from_message,
+    build_format_choice_message,
 )
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message as DBMessage, Lead
@@ -412,7 +413,8 @@ def create_vk_bot(token: str, group_id: int):
                     logger.error(f"Failed to send VK lead after phone confirm: {e}")
 
                 # Переходим к следующему шагу
-                await message.answer("🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?")
+                format_msg = build_format_choice_message(lead_dict.get("event_date"), lead_dict.get("kids_count"))
+                await message.answer(format_msg or "🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?")
                 
             elif cmd == "confirm_phone_no":
                 # Не подтвердил -> просим указать другой номер
@@ -1301,7 +1303,8 @@ def create_vk_bot(token: str, group_id: int):
                     is_room = "комнат" in format_value or "room" in format_value
 
                     if not format_value:
-                        await message.answer("🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?")
+                        format_msg = build_format_choice_message(lead_data.get("event_date"), lead_data.get("kids_count"))
+                        await message.answer(format_msg or "🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?")
                         return
 
                     if is_room and not lead_data.get("time"):

@@ -28,6 +28,7 @@ from core.utils import (
     should_defer_phone_request,
     extract_phone_from_message,
     extract_format_from_message,
+    build_format_choice_message,
 )
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message, Lead
@@ -333,6 +334,27 @@ async def chat(request: ChatRequest):
 
         # ============ BIRTHDAY DATE STEP — фиксированный вопрос про детей ============
         if session.intent == "birthday":
+            # --- Обработка подтверждения телефона (web) ---
+            if session.lead_data and session.lead_data.get("pending_phone_confirm"):
+                pending_phone = session.lead_data.get("pending_phone_confirm")
+                text = request.message.strip().lower()
+                yes_words = ["да", "да!", "ага", "конечно", "верно", "правильно", "ок", "окей"]
+                no_words = ["нет", "неа", "не", "неверно", "неправильно"]
+                if text in yes_words:
+                    session.lead_data["phone_confirmed"] = True
+                    session.lead_data.pop("pending_phone_confirm", None)
+                    db.commit()
+                elif text in no_words:
+                    session.lead_data.pop("pending_phone_confirm", None)
+                    session.lead_data["phone_confirmed"] = False
+                    db.commit()
+                    response = "📱 Хорошо! Укажите актуальный номер телефона для связи:"
+                    bot_message = Message(session_id=session.id, role="assistant", content=response)
+                    db.add(bot_message)
+                    db.commit()
+                    db.close()
+                    return ChatResponse(reply=response, session_id=session_id)
+
             # Если в сообщении есть дата — фиксируем и сразу спрашиваем про детей
             parsed_date = parse_user_date(request.message)
             if parsed_date and current_lead:
@@ -376,6 +398,9 @@ async def chat(request: ChatRequest):
                 if phone_candidate and current_lead:
                     current_lead = update_lead_from_data(current_lead.id, {"phone": phone_candidate})
                     lead_data = lead_to_dict(current_lead)
+                    session.lead_data = session.lead_data or {}
+                    session.lead_data["phone_confirmed"] = True
+                    db.commit()
 
             # Если пользователь выбрал формат — фиксируем без LLM
             if lead_data and lead_data.get("event_date") and lead_data.get("kids_count"):
@@ -384,8 +409,32 @@ async def chat(request: ChatRequest):
                     current_lead = update_lead_from_data(current_lead.id, {"format": format_candidate})
                     lead_data = lead_to_dict(current_lead)
 
+            # Если сделка уже есть — синхронизируем поля после обновлений
+            if current_lead and current_lead.amocrm_deal_id:
+                try:
+                    await amocrm_client.update_deal_fields(int(current_lead.amocrm_deal_id), lead_data)
+                except Exception as e:
+                    logger.error(f"Failed to update AmoCRM deal (web): {e}")
+
+            session.lead_data = session.lead_data or {}
+            phone_confirmed = bool(session.lead_data.get("phone_confirmed"))
+            pending_phone = session.lead_data.get("pending_phone_confirm")
+            phone_value = lead_data.get("phone")
+            effective_phone = phone_value if phone_confirmed else None
+
+            # Если телефон есть, но не подтвержден — запросить подтверждение
+            if lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and phone_value and not phone_confirmed and not pending_phone:
+                session.lead_data["pending_phone_confirm"] = phone_value
+                db.commit()
+                response = f"📱 Актуален ли этот номер телефона для связи?\n{phone_value}\n\nОтветьте: да/нет."
+                bot_message = Message(session_id=session.id, role="assistant", content=response)
+                db.add(bot_message)
+                db.commit()
+                db.close()
+                return ChatResponse(reply=response, session_id=session_id)
+
             # Если дата и дети уже есть, но телефона нет — спрашиваем телефон
-            if lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
+            if lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and not effective_phone:
                 if should_defer_phone_request(request.message):
                     session.lead_data = session.lead_data or {}
                     session.lead_data["defer_phone_request"] = True
@@ -399,7 +448,7 @@ async def chat(request: ChatRequest):
                     return ChatResponse(reply=response, session_id=session_id)
 
             # Если дата, дети и телефон есть — создаём сделку (если ещё нет) и задаём короткие вопросы
-            if lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and lead_data.get("phone"):
+            if lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and effective_phone:
                 if current_lead and not current_lead.amocrm_deal_id:
                     try:
                         from core.amocrm import send_lead_to_amocrm
@@ -434,7 +483,8 @@ async def chat(request: ChatRequest):
                 is_room = "комнат" in format_value or "room" in format_value
                 
                 if not format_value:
-                    response = "🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
+                    response = build_format_choice_message(lead_data.get("event_date"), lead_data.get("kids_count")) \
+                        or "🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
                     bot_message = Message(session_id=session.id, role="assistant", content=response)
                     db.add(bot_message)
                     db.commit()

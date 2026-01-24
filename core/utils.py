@@ -465,3 +465,58 @@ def extract_format_from_message(message: str) -> str | None:
     if any(k in text for k in room_keywords):
         return "Тематическая комната"
     return None
+
+
+def _format_money(value: int) -> str:
+    """Format integer money with space thousands."""
+    try:
+        return f"{int(value):,}".replace(",", " ")
+    except Exception:
+        return str(value)
+
+
+def calculate_birthday_costs(kids_count: int, price: int) -> tuple[int, int]:
+    """Return (room_cost, restaurant_cost) based on kids_count and price."""
+    if kids_count <= 0:
+        return 0, 0
+
+    # Room: minimum 6 paid, or birthday free for 7+ kids
+    if kids_count >= 7:
+        paid_room = kids_count - 1
+    else:
+        paid_room = max(kids_count, 6)
+    room_cost = paid_room * price
+
+    # Restaurant: no minimum, birthday 50% off ticket
+    half = price // 2
+    paid_rest = max(kids_count - 1, 0)
+    restaurant_cost = paid_rest * price + half
+
+    return room_cost, restaurant_cost
+
+
+def build_format_choice_message(event_date_str: str, kids_count: int) -> str | None:
+    """Build a format choice message with calculated costs for room and restaurant."""
+    if not event_date_str or not kids_count:
+        return None
+
+    date_obj = parse_user_date(event_date_str)
+    if not date_obj:
+        return None
+
+    price = get_birthday_price_for_date(date_obj)
+    room_cost, restaurant_cost = calculate_birthday_costs(int(kids_count), price)
+
+    # Paid counts for display
+    paid_room = (kids_count - 1) if kids_count >= 7 else max(kids_count, 6)
+    paid_rest = max(kids_count - 1, 0)
+    half = price // 2
+
+    return (
+        "Давайте выберем формат праздника? 💚\n\n"
+        "🏠 Тематическая комната — 3 часа\n"
+        f"Для {kids_count} детей: {paid_room} × {price}₽ = {_format_money(room_cost)}₽\n\n"
+        "🍰 Столик в ресторане — без ограничений по времени\n"
+        f"Для {kids_count} детей: {paid_rest} × {price}₽ + 1 × {half}₽ (именинник -50%) = {_format_money(restaurant_cost)}₽\n\n"
+        "Какой формат предпочитаете — комната или ресторан?"
+    )

@@ -115,6 +115,7 @@ from core.utils import (
     should_defer_phone_request,
     extract_phone_from_message,
     extract_format_from_message,
+    build_format_choice_message,
 )
 
 
@@ -899,9 +900,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Failed to notify managers after phone confirm: {e}")
 
             # Переходим к следующему шагу (короткие вопросы)
+            lead_after = lead_to_dict(get_or_create_lead(update.effective_user.id))
+            format_msg = build_format_choice_message(lead_after.get("event_date"), lead_after.get("kids_count"))
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
+                text=format_msg or "🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
             )
         
         elif query.data == "confirm_phone_no":
@@ -1001,9 +1004,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         text="👶 Сколько детей будет всего, включая именинника?"
                     )
             else:
+                format_msg = build_format_choice_message(lead_data.get("event_date"), lead_data.get("kids_count"))
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text="🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
+                    text=format_msg or "🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
                 )
         
         elif query.data == "confirm_returning_phone_no":
@@ -2456,9 +2460,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 is_restaurant = "ресторан" in format_value or "restaurant" in format_value
 
                 if not format_value:
+                    format_msg = build_format_choice_message(lead_data.get("event_date"), lead_data.get("kids_count"))
                     await context.bot.send_message(
                         chat_id=update.effective_chat.id,
-                        text="🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
+                        text=format_msg or "🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
                     )
                     return
 
