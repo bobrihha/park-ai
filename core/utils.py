@@ -443,3 +443,25 @@ def extract_phone_from_message(message: str) -> str | None:
     if len(digits) < 10:
         return None
     return digits[-10:]
+
+
+def extract_format_from_message(message: str) -> str | None:
+    """Extract party format from user message."""
+    if not message:
+        return None
+    text = message.lower()
+
+    restaurant_keywords = [
+        "ресторан", "в ресторане", "зал ресторана",
+        "столик", "столик в ресторане", "стол",
+    ]
+    room_keywords = [
+        "комната", "комнату", "комнатка",
+        "тематическ", "room",
+    ]
+
+    if any(k in text for k in restaurant_keywords):
+        return "Ресторан"
+    if any(k in text for k in room_keywords):
+        return "Тематическая комната"
+    return None
