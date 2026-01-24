@@ -102,6 +102,13 @@ class Agent:
                     pass
             
             system_prompt += "\n" + "="*50
+
+            system_prompt += (
+                "\n\n🚫 ВАЖНО: НЕ сообщай о принятии/передаче заявки сразу после телефона."
+                "\nТелефон нужен для CRM, но клиенту это НЕ озвучиваем на этом шаге."
+                "\nСначала собери: дата, дети, телефон, формат, время (если комната), имя."
+                "\nДаже если заявка уже создана в CRM — продолжай квалификацию и задавай следующий вопрос."
+            )
             
             # Определяем что ещё нужно собрать (ПОРЯДОК ВАЖЕН!)
             # После дата + дети + телефон → создаём заявку в CRM и продолжаем собирать данные
@@ -113,10 +120,14 @@ class Agent:
             if not lead_data.get("phone"):
                 missing.append("Номер телефона для связи")
             # После получения телефона — заявка уходит в CRM, но мы продолжаем собирать данные
+            format_value = (lead_data.get("format") or "").strip().lower()
             if not lead_data.get("format"):
                 missing.append("Формат праздника (Тематическая комната или Ресторан)")
-            if not lead_data.get("time"):
+            is_room = "комнат" in format_value or "room" in format_value
+            if is_room and not lead_data.get("time"):
                 missing.append("Время начала (10:30, 14:30 или 18:30)")
+            if not lead_data.get("customer_name"):
+                missing.append("Имя для связи")
             
             if missing:
                 # Указываем СЛЕДУЮЩИЙ КОНКРЕТНЫЙ вопрос
