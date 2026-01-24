@@ -34,6 +34,7 @@ from core.utils import (
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message, Lead
 from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy import inspect
 from core.lead_service import (
     get_or_create_lead,
     update_lead_from_data,
@@ -58,7 +59,19 @@ def _refresh_lead(db, lead: Lead | None) -> Lead | None:
     """Reload lead in текущей DB-сессии to avoid detached instances."""
     if not lead:
         return None
-    return db.query(Lead).filter(Lead.id == lead.id).first()
+    lead_id = None
+    try:
+        state = inspect(lead)
+        if state.identity:
+            lead_id = state.identity[0]
+    except Exception:
+        lead_id = None
+    if not lead_id:
+        # Fallback without triggering lazy load
+        lead_id = lead.__dict__.get("id")
+    if not lead_id:
+        return None
+    return db.query(Lead).filter(Lead.id == lead_id).first()
 
 app = FastAPI(
     title="Jungle City Chat API",
@@ -683,6 +696,7 @@ async def chat(request: ChatRequest):
                 # (бот говорит "аниматор, торт, шары — по желанию" и система думала что клиент их заказал)
                 # Данные уже были извлечены из сообщений пользователя в lead_data
                 current_lead = update_lead_from_data(current_lead.id, lead_data)
+                current_lead = _refresh_lead(db, current_lead)
                 
                 # Формируем историю чата для AmoCRM
                 chat_history_text = "\\n".join([
