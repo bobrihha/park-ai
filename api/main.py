@@ -18,6 +18,7 @@ from core.agent import Agent
 from core.rag import RAGSystem
 from core.intent_router import detect_intent
 from core.amocrm import amocrm_client
+from core.messages import BIRTHDAY_WELCOME_MESSAGE
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message, Lead
 from core.lead_service import (
@@ -293,21 +294,7 @@ async def chat(request: ChatRequest):
         
         # ============ BIRTHDAY WELCOME — приветственное сообщение как в TG/VK ============
         if intent_just_switched_to_birthday:
-            birthday_welcome = (
-                "💜💚 Отлично! День рождения в Джунглях — это радость и вау-эмоции! 💚💜\n\n"
-                "У нас есть 2 формата праздника — выбирайте, что подойдёт именно вам 💚\n\n"
-                "🏠 ТЕМАТИЧЕСКАЯ КОМНАТА (3 часа)\n"
-                "— предоставляется при оплате 6 полных детских билетов\n"
-                "— от 7 детей — ИМЕНИННИК БЕСПЛАТНО\n"
-                "— безлимит на аттракционы 💚\n\n"
-                "🍰 Столик в ресторане\n"
-                "— без ограничения по времени\n"
-                "— именинник — скидка 50% на вход\n"
-                "— безлимит на аттракционы 💚\n\n"
-                "✨ Аниматоры, торт, шары, аквагрим — по желанию.\n"
-                "Давайте подберём идеальный вариант для вас 💜\n\n"
-                "📅 На какую дату планируете праздник?"
-            )
+            birthday_welcome = BIRTHDAY_WELCOME_MESSAGE
             
             # Сохраняем ответ
             bot_message = Message(session_id=session.id, role="assistant", content=birthday_welcome)

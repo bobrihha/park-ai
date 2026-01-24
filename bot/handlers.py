@@ -46,6 +46,7 @@ from core.lead_service import (
     get_last_known_phone
 )
 from core.amocrm import send_lead_to_amocrm, amocrm_client
+from core.messages import BIRTHDAY_WELCOME_MESSAGE
 
 logger = logging.getLogger(__name__)
 
@@ -686,21 +687,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Если контакт не найден или нет телефона — стандартный флоу
             # Отправляем фото с текстом
-            caption = (
-                "💜💚 Отлично! День рождения в Джунглях — это радость и вау-эмоции! 💚💜\n\n"
-                "У нас есть 2 формата праздника — выбирайте, что подойдёт именно вам 💚\n\n"
-                "🏠 ТЕМАТИЧЕСКАЯ КОМНАТА (3 часа)\n"
-                "—предоставляется при оплате 6 полных детских билетов\n"
-                "— от 7 детей — ИМЕНИННИК БЕСПЛАТНО\n"
-                "— безлимит на аттракционы 💚\n\n"
-                "🍰 Столик в ресторане\n"
-                "— без ограничения по времени\n"
-                "— именинник — скидка 50% на вход\n"
-                "— безлимит на аттракционы 💚\n\n"
-                "✨ Аниматоры, торт, шары, аквагрим — по желанию.\n"
-                "Давайте подберём идеальный вариант для вас 💜\n\n"
-                "📅 На какую дату планируете праздник?"
-            )
+            caption = BIRTHDAY_WELCOME_MESSAGE
             with open(IMAGES["birthday"], 'rb') as photo_file:
                 await context.bot.send_photo(
                     chat_id=chat_id,
@@ -950,21 +937,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("pending_customer_name", None)
             
             # Отправляем стандартное сообщение о бронировании
-            caption = (
-                "💜💚 Отлично! День рождения в Джунглях — это радость и вау-эмоции! 💚💜\n\n"
-                "У нас есть 2 формата праздника — выбирайте, что подойдёт именно вам 💚\n\n"
-                "🏠 ТЕМАТИЧЕСКАЯ КОМНАТА (3 часа)\n"
-                "—предоставляется при оплате 6 полных детских билетов\n"
-                "— от 7 детей — ИМЕНИННИК БЕСПЛАТНО\n"
-                "— безлимит на аттракционы 💚\n\n"
-                "🍰 Столик в ресторане\n"
-                "— без ограничения по времени\n"
-                "— именинник — скидка 50% на вход\n"
-                "— безлимит на аттракционы 💚\n\n"
-                "✨ Аниматоры, торт, шары, аквагрим — по желанию.\n"
-                "Давайте подберём идеальный вариант для вас 💜\n\n"
-                "📅 На какую дату планируете праздник?"
-            )
+            caption = BIRTHDAY_WELCOME_MESSAGE
             with open(IMAGES["birthday"], 'rb') as photo_file:
                 await context.bot.send_photo(
                     chat_id=chat_id,

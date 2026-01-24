@@ -11,6 +11,7 @@ import aiohttp
 from core.agent import Agent
 from core.rag import RAGSystem
 from core.intent_router import detect_intent
+from core.messages import BIRTHDAY_WELCOME_MESSAGE
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message as DBMessage, Lead
 from sqlalchemy.orm.attributes import flag_modified
@@ -310,21 +311,7 @@ def create_vk_bot(token: str, group_id: int):
 
     async def send_birthday_intro(message: Message):
         """Отправить стандартное приветствие для ДР."""
-        text = (
-            "💜💚 Отлично! День рождения в Джунглях — это радость и вау-эмоции! 💚💜\n\n"
-            "У нас есть 2 формата праздника — выбирайте, что подойдёт именно вам 💚\n\n"
-            "🏠 ТЕМАТИЧЕСКАЯ КОМНАТА (3 часа)\n"
-            "—предоставляется при оплате 6 полных детских билетов\n"
-            "— от 7 детей — ИМЕНИННИК БЕСПЛАТНО\n"
-            "— безлимит на аттракционы 💚\n\n"
-            "🍰 Столик в ресторане\n"
-            "— без ограничения по времени\n"
-            "— именинник — скидка 50% на вход\n"
-            "— безлимит на аттракционы 💚\n\n"
-            "✨ Аниматоры, торт, шары, аквагрим — по желанию.\n"
-            "Давайте подберём идеальный вариант для вас 💜\n\n"
-            "📅 На какую дату планируете праздник?"
-        )
+        text = BIRTHDAY_WELCOME_MESSAGE
         attachment = await upload_photo_from_file(IMAGES["birthday"], message.peer_id)
         if attachment:
             await message.answer(text, attachment=attachment)
