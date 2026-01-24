@@ -26,6 +26,7 @@ from core.utils import (
     parse_kids_count,
     filter_extras_from_message,
     should_defer_phone_request,
+    extract_phone_from_message,
 )
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message, Lead
@@ -367,6 +368,13 @@ async def chat(request: ChatRequest):
                     db.commit()
                     db.close()
                     return ChatResponse(reply=response, session_id=session_id)
+
+            # Если ждём телефон и пользователь прислал его — сохраняем без LLM
+            if lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
+                phone_candidate = extract_phone_from_message(request.message)
+                if phone_candidate and current_lead:
+                    current_lead = update_lead_from_data(current_lead.id, {"phone": phone_candidate})
+                    lead_data = lead_to_dict(current_lead)
 
             # Если дата и дети уже есть, но телефона нет — спрашиваем телефон
             if lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):

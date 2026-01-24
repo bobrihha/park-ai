@@ -433,3 +433,13 @@ def should_defer_phone_request(message: str) -> bool:
     has_topic = any(k in text for k in topic_keywords)
 
     return has_info_trigger and has_topic
+
+
+def extract_phone_from_message(message: str) -> str | None:
+    """Extract a phone number from a message (returns last 10 digits)."""
+    if not message:
+        return None
+    digits = re.sub(r"\D", "", str(message))
+    if len(digits) < 10:
+        return None
+    return digits[-10:]

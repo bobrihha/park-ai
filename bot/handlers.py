@@ -113,6 +113,7 @@ from core.utils import (
     parse_kids_count,
     filter_extras_from_message,
     should_defer_phone_request,
+    extract_phone_from_message,
 )
 
 
@@ -2341,6 +2342,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         text=response_text
                     )
                     return
+
+            # Если ждём телефон и пользователь прислал его — сохраняем без LLM
+            if lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
+                phone_candidate = extract_phone_from_message(message_text)
+                if phone_candidate:
+                    current_lead = update_lead_from_data(current_lead.id, {"phone": phone_candidate})
+                    lead_data = lead_to_dict(current_lead)
             
             # Проверяем: нужно подтвердить телефон для нового бронирования?
             pending_phone = context.user_data.get("pending_phone_confirm")

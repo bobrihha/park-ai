@@ -19,6 +19,7 @@ from core.utils import (
     parse_kids_count,
     filter_extras_from_message,
     should_defer_phone_request,
+    extract_phone_from_message,
 )
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message as DBMessage, Lead
@@ -1180,6 +1181,13 @@ def create_vk_bot(token: str, group_id: int):
                     if date_obj:
                         await message.answer(build_birthday_date_question(date_obj))
                         return
+
+                # Если ждём телефон и пользователь прислал его — сохраняем без LLM
+                if lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
+                    phone_candidate = extract_phone_from_message(message_text)
+                    if phone_candidate:
+                        current_lead = update_lead_from_data(current_lead.id, {"phone": phone_candidate})
+                        lead_data = lead_to_dict(current_lead)
 
                 # Если есть сохранённый телефон из AmoCRM — подтверждаем его ПОСЛЕ детей
                 pending_phone = None
