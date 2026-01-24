@@ -917,6 +917,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # removed redundant import
                 update_lead_from_data(pending_lead_id, {"phone": pending_phone})
                 logger.info(f"Lead #{pending_lead_id} confirmed returning phone: {pending_phone}")
+                
+                # Отправляем в AmoCRM
+                lead_data_for_crm = lead_to_dict(get_or_create_lead(update.effective_user.id))
+                if lead_data_for_crm.get("phone"):
+                    result = await send_lead_to_amocrm(
+                        lead_data_for_crm, 
+                        telegram_id=update.effective_user.id,
+                        username=update.effective_user.username
+                    )
+                    if result and result[0]:
+                        deal_id, contact_id = result
+                        save_amocrm_deal_id(pending_lead_id, deal_id)
+                        if contact_id:
+                            save_amocrm_contact_id(pending_lead_id, contact_id)
+                        logger.info(f"Lead #{pending_lead_id} sent to AmoCRM, deal_id: {deal_id}")
             
             # Очищаем pending
             context.user_data.pop("pending_phone_confirm", None)
@@ -2251,20 +2266,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             lead_data = lead_to_dict(current_lead)
 
-            # Если дата ещё не сохранена — пытаемся распарсить из последнего сообщения
-            if not lead_data.get("event_date"):
-                parsed_date = parse_user_date(message_text)
-                if parsed_date:
-                    normalized_date = format_date_ru(parsed_date, include_year=False)
-                    current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
-                    lead_data = lead_to_dict(current_lead)
+            # Если в сообщении есть дата — фиксируем и сразу спрашиваем про детей
+            parsed_date = parse_user_date(message_text)
+            if parsed_date:
+                normalized_date = format_date_ru(parsed_date, include_year=False)
+                current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
+                lead_data = lead_to_dict(current_lead)
+                context.user_data["force_kids"] = True
+                response_text = build_birthday_date_question(parsed_date)
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=response_text
+                )
+                return
 
-            # Если дата есть, но детей ещё нет — пытаемся распарсить число из ответа
-            if lead_data.get("event_date") and not lead_data.get("kids_count"):
+            # Если дата есть, но детей ещё нет (или мы форсим сбор) — пытаемся распарсить число
+            force_kids = context.user_data.get("force_kids")
+            if lead_data.get("event_date") and (force_kids or not lead_data.get("kids_count")):
                 kids_count = parse_kids_count(message_text)
                 if kids_count:
                     current_lead = update_lead_from_data(current_lead.id, {"kids_count": kids_count})
                     lead_data = lead_to_dict(current_lead)
+                    context.user_data.pop("force_kids", None)
 
             # Если дата есть, но детей всё ещё нет — задаём следующий вопрос с ценой
             if lead_data.get("event_date") and not lead_data.get("kids_count"):

@@ -309,20 +309,32 @@ async def chat(request: ChatRequest):
 
         # ============ BIRTHDAY DATE STEP — фиксированный вопрос про детей ============
         if session.intent == "birthday":
-            # Если дата ещё не сохранена — пытаемся распарсить из сообщения
-            if lead_data is not None and not lead_data.get("event_date"):
-                parsed_date = parse_user_date(request.message)
-                if parsed_date and current_lead:
-                    normalized_date = format_date_ru(parsed_date, include_year=False)
-                    current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
-                    lead_data = lead_to_dict(current_lead)
+            # Если в сообщении есть дата — фиксируем и сразу спрашиваем про детей
+            parsed_date = parse_user_date(request.message)
+            if parsed_date and current_lead:
+                normalized_date = format_date_ru(parsed_date, include_year=False)
+                current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
+                lead_data = lead_to_dict(current_lead)
+                session.lead_data = session.lead_data or {}
+                session.lead_data["force_kids"] = True
+                db.commit()
+                response = build_birthday_date_question(parsed_date)
+                bot_message = Message(session_id=session.id, role="assistant", content=response)
+                db.add(bot_message)
+                db.commit()
+                db.close()
+                return ChatResponse(reply=response, session_id=session_id)
 
             # Если дата есть, но детей ещё нет — задаём следующий вопрос с ценой
-            if lead_data and lead_data.get("event_date") and not lead_data.get("kids_count"):
+            force_kids = session.lead_data.get("force_kids") if session.lead_data else None
+            if lead_data and lead_data.get("event_date") and (force_kids or not lead_data.get("kids_count")):
                 kids_count = parse_kids_count(request.message)
                 if kids_count and current_lead:
                     current_lead = update_lead_from_data(current_lead.id, {"kids_count": kids_count})
                     lead_data = lead_to_dict(current_lead)
+                    if session.lead_data:
+                        session.lead_data.pop("force_kids", None)
+                        db.commit()
 
             if lead_data and lead_data.get("event_date") and not lead_data.get("kids_count"):
                 date_obj = parse_user_date(lead_data["event_date"]) or parse_user_date(request.message)

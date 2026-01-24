@@ -1117,20 +1117,30 @@ def create_vk_bot(token: str, group_id: int):
                 # РАННЯЯ ОТПРАВКА В CRM: Как только есть телефон — создаём сделку
                 lead_data = lead_to_dict(current_lead)
 
-                # Если дата ещё не сохранена — пытаемся распарсить из последнего сообщения
-                if not lead_data.get("event_date"):
-                    parsed_date = parse_user_date(message_text)
-                    if parsed_date:
-                        normalized_date = format_date_ru(parsed_date, include_year=False)
-                        current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
-                        lead_data = lead_to_dict(current_lead)
+                # Если в сообщении есть дата — фиксируем и сразу спрашиваем про детей
+                parsed_date = parse_user_date(message_text)
+                if parsed_date:
+                    normalized_date = format_date_ru(parsed_date, include_year=False)
+                    current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
+                    lead_data = lead_to_dict(current_lead)
+                    session.lead_data = session.lead_data or {}
+                    session.lead_data["force_kids"] = True
+                    flag_modified(session, "lead_data")
+                    db.commit()
+                    await message.answer(build_birthday_date_question(parsed_date))
+                    return
 
-                # Если дата есть, но детей ещё нет — пытаемся распарсить число из ответа
-                if lead_data.get("event_date") and not lead_data.get("kids_count"):
+                # Если дата есть, но детей ещё нет (или мы форсим сбор) — пытаемся распарсить число
+                force_kids = session.lead_data.get("force_kids") if session.lead_data else None
+                if lead_data.get("event_date") and (force_kids or not lead_data.get("kids_count")):
                     kids_count = parse_kids_count(message_text)
                     if kids_count:
                         current_lead = update_lead_from_data(current_lead.id, {"kids_count": kids_count})
                         lead_data = lead_to_dict(current_lead)
+                        if session.lead_data:
+                            session.lead_data.pop("force_kids", None)
+                            flag_modified(session, "lead_data")
+                            db.commit()
 
                 # Если дата есть, но детей всё ещё нет — задаём следующий вопрос с ценой
                 if lead_data.get("event_date") and not lead_data.get("kids_count"):
