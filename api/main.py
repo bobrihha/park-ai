@@ -342,7 +342,7 @@ async def chat(request: ChatRequest):
             change_keywords = ["изменить", "перенести", "поменять", "другую дату", "сменить"]
             start_keywords = ["хочу организовать", "хочу забронировать", "забронировать праздник", "организовать день рождения", "хочу праздник"]
             start_new_booking = any(k in text_lower for k in start_keywords) and not any(k in text_lower for k in change_keywords)
-            if start_new_booking and current_lead and (current_lead.event_date or current_lead.kids_count):
+            if start_new_booking and current_lead:
                 current_lead = force_create_new_lead(session_id, park_id="nn", source="web")
                 lead_data = lead_to_dict(current_lead)
                 # Сбросим служебные флаги, сохраняя данные регистрации
@@ -374,7 +374,14 @@ async def chat(request: ChatRequest):
             phone_confirmed_override = False
 
             if (session.lead_data and session.lead_data.get("pending_phone_confirm")) or asked_phone_confirm:
-                pending_phone = session.lead_data.get("pending_phone_confirm")
+                pending_phone = session.lead_data.get("pending_phone_confirm") if session.lead_data else None
+                # Если pending не задан, но бот только что спросил — используем телефон из лида
+                if not pending_phone and lead_data and lead_data.get("phone"):
+                    pending_phone = lead_data.get("phone")
+                    session.lead_data = session.lead_data or {}
+                    session.lead_data["pending_phone_confirm"] = pending_phone
+                    flag_modified(session, "lead_data")
+                    db.commit()
                 text = request.message.strip().lower()
                 if _is_yes(text):
                     session.lead_data["phone_confirmed"] = True
@@ -393,6 +400,15 @@ async def chat(request: ChatRequest):
                     db.commit()
                     db.close()
                     return ChatResponse(reply=response, session_id=session_id)
+                else:
+                    # Не распознали ответ — повторяем подтверждение и выходим
+                    if pending_phone:
+                        response = f"📱 Актуален ли этот номер телефона для связи?\n{pending_phone}\n\nОтветьте: да/нет."
+                        bot_message = Message(session_id=session.id, role="assistant", content=response)
+                        db.add(bot_message)
+                        db.commit()
+                        db.close()
+                        return ChatResponse(reply=response, session_id=session_id)
 
             # Если в сообщении есть дата — фиксируем и сразу спрашиваем про детей
             parsed_date = parse_user_date(request.message)
