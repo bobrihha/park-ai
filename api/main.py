@@ -25,6 +25,7 @@ from core.utils import (
     build_birthday_date_question,
     parse_kids_count,
     filter_extras_from_message,
+    should_defer_phone_request,
 )
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message, Lead
@@ -369,12 +370,17 @@ async def chat(request: ChatRequest):
 
             # Если дата и дети уже есть, но телефона нет — спрашиваем телефон
             if lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
-                response = "📱 Оставьте номер телефона для связи:"
-                bot_message = Message(session_id=session.id, role="assistant", content=response)
-                db.add(bot_message)
-                db.commit()
-                db.close()
-                return ChatResponse(reply=response, session_id=session_id)
+                if should_defer_phone_request(request.message):
+                    session.lead_data = session.lead_data or {}
+                    session.lead_data["defer_phone_request"] = True
+                    db.commit()
+                else:
+                    response = "📱 Оставьте номер телефона для связи:"
+                    bot_message = Message(session_id=session.id, role="assistant", content=response)
+                    db.add(bot_message)
+                    db.commit()
+                    db.close()
+                    return ChatResponse(reply=response, session_id=session_id)
 
             # Если дата, дети и телефон есть — создаём сделку (если ещё нет) и задаём короткие вопросы
             if lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and lead_data.get("phone"):
@@ -504,6 +510,17 @@ async def chat(request: ChatRequest):
                 history=history_list,
                 lead_data=lead_data
             )
+
+            # Если откладывали запрос телефона — добавляем после ответа
+            if session.intent == "birthday":
+                defer_phone = None
+                if session.lead_data and session.lead_data.get("defer_phone_request"):
+                    defer_phone = True
+                    session.lead_data.pop("defer_phone_request", None)
+                    db.commit()
+                if defer_phone and lead_data and not lead_data.get("phone"):
+                    if "телефон" not in response.lower() and "номер" not in response.lower():
+                        response += "\n\n📱 Оставьте номер телефона для связи, чтобы мы закрепили бронирование."
         
         # Сохраняем ответ бота
         bot_message = Message(

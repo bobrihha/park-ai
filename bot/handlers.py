@@ -112,6 +112,7 @@ from core.utils import (
     build_birthday_date_question,
     parse_kids_count,
     filter_extras_from_message,
+    should_defer_phone_request,
 )
 
 
@@ -2361,11 +2362,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Если дата и дети уже есть, но телефона нет — спрашиваем телефон
             if lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone") and not pending_phone:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text="📱 Оставьте номер телефона для связи:"
-                )
-                return
+                if should_defer_phone_request(message_text):
+                    context.user_data["defer_phone_request"] = True
+                else:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="📱 Оставьте номер телефона для связи:"
+                    )
+                    return
             
             # РАННЯЯ ОТПРАВКА В CRM: Как только есть телефон — создаём сделку
             
@@ -2491,6 +2495,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lead_data=lead_data,
             deal_in_work=deal_in_work
         )
+
+        # Если откладывали запрос телефона — добавляем после ответа
+        if session.intent == "birthday":
+            defer_phone = context.user_data.pop("defer_phone_request", None)
+            if defer_phone and lead_data and not lead_data.get("phone"):
+                if "телефон" not in response.lower() and "номер" not in response.lower():
+                    response += "\n\n📱 Оставьте номер телефона для связи, чтобы мы закрепили бронирование."
         
         # Сохраняем ответ
         assistant_message = Message(session_id=session.id, role="assistant", content=response)

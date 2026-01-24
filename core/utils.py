@@ -406,3 +406,30 @@ def filter_extras_from_message(
                 return bot_mentions
 
     return []
+
+
+def should_defer_phone_request(message: str) -> bool:
+    """Return True if user asks for info and we should answer before requesting phone."""
+    if not message:
+        return False
+
+    text = message.lower().strip()
+
+    # Don't defer if this looks like a phone number
+    if re.search(r"\b[789]\d{9,10}\b", text) or re.search(r"[\+\(\)]", text):
+        return False
+
+    info_triggers = [
+        "расскажи", "расскажите", "подскажите", "есть ли", "можно ли",
+        "что входит", "сколько", "какие", "какой", "цена", "стоимость",
+    ]
+    topic_keywords = [
+        "пакет", "под ключ", "аниматор", "анимац", "квест", "шоу",
+        "торт", "шар", "аквагрим", "фотограф", "меню", "еда", "угощ",
+        "комната", "ресторан", "слот", "время", "формат",
+    ]
+
+    has_info_trigger = any(k in text for k in info_triggers) or "?" in text
+    has_topic = any(k in text for k in topic_keywords)
+
+    return has_info_trigger and has_topic

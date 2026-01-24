@@ -18,6 +18,7 @@ from core.utils import (
     build_birthday_date_question,
     parse_kids_count,
     filter_extras_from_message,
+    should_defer_phone_request,
 )
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message as DBMessage, Lead
@@ -1205,8 +1206,14 @@ def create_vk_bot(token: str, group_id: int):
 
                 # Если дата и дети уже есть, но телефона нет — спрашиваем телефон
                 if lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
-                    await message.answer("📱 Оставьте номер телефона для связи:")
-                    return
+                    if should_defer_phone_request(message_text):
+                        session.lead_data = session.lead_data or {}
+                        session.lead_data["defer_phone_request"] = True
+                        flag_modified(session, "lead_data")
+                        db.commit()
+                    else:
+                        await message.answer("📱 Оставьте номер телефона для связи:")
+                        return
                 
                 # Проверяем валидность телефона (минимум 10 цифр)
                 phone = lead_data.get("phone", "")
@@ -1318,6 +1325,18 @@ def create_vk_bot(token: str, group_id: int):
                 lead_data=lead_data,
                 deal_in_work=deal_in_work
             )
+
+            # Если откладывали запрос телефона — добавляем после ответа
+            if session.intent == "birthday":
+                defer_phone = None
+                if session.lead_data and session.lead_data.get("defer_phone_request"):
+                    defer_phone = True
+                    session.lead_data.pop("defer_phone_request", None)
+                    flag_modified(session, "lead_data")
+                    db.commit()
+                if defer_phone and lead_data and not lead_data.get("phone"):
+                    if "телефон" not in response.lower() and "номер" not in response.lower():
+                        response += "\n\n📱 Оставьте номер телефона для связи, чтобы мы закрепили бронирование."
             
             # Сохраняем ответ
             assistant_msg = DBMessage(session_id=session.id, role="assistant", content=response)
