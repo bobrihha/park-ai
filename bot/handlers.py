@@ -867,6 +867,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if contact_id:
                             save_amocrm_contact_id(pending_lead_id, contact_id)
                         logger.info(f"Lead #{pending_lead_id} sent to AmoCRM, deal_id: {deal_id}")
+                        # Добавляем историю переписки в AmoCRM
+                        try:
+                            db_local = SessionLocal()
+                            session = db_local.query(DBSession).filter(DBSession.telegram_id == str(update.effective_user.id)).first()
+                            if session:
+                                msgs = db_local.query(Message).filter(Message.session_id == session.id).order_by(Message.id).limit(30).all()
+                                chat_history_text = "\n".join(
+                                    [f"{'Клиент' if m.role == 'user' else 'Бот'}: {m.content}" for m in msgs]
+                                )
+                                await amocrm_client.add_note(int(deal_id), f"📱 История переписки:\n\n{chat_history_text}")
+                            db_local.close()
+                        except Exception as ne:
+                            logger.error(f"Failed to add chat history note: {ne}")
             
             # Очищаем pending
             context.user_data.pop("pending_phone_confirm", None)
@@ -932,6 +945,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if contact_id:
                             save_amocrm_contact_id(pending_lead_id, contact_id)
                         logger.info(f"Lead #{pending_lead_id} sent to AmoCRM, deal_id: {deal_id}")
+                        # Добавляем историю переписки в AmoCRM
+                        try:
+                            db_local = SessionLocal()
+                            session = db_local.query(DBSession).filter(DBSession.telegram_id == str(update.effective_user.id)).first()
+                            if session:
+                                msgs = db_local.query(Message).filter(Message.session_id == session.id).order_by(Message.id).limit(30).all()
+                                chat_history_text = "\n".join(
+                                    [f"{'Клиент' if m.role == 'user' else 'Бот'}: {m.content}" for m in msgs]
+                                )
+                                await amocrm_client.add_note(int(deal_id), f"📱 История переписки:\n\n{chat_history_text}")
+                            db_local.close()
+                        except Exception as ne:
+                            logger.error(f"Failed to add chat history note: {ne}")
             
             # Очищаем pending
             context.user_data.pop("pending_phone_confirm", None)
@@ -2356,6 +2382,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             current_lead.amocrm_contact_id = str(amocrm_contact_id)
                         current_lead.amocrm_deal_id = str(amocrm_deal_id)  # Обновляем локальный объект
                         logger.info(f"Lead #{current_lead.id} created in AmoCRM, deal_id={amocrm_deal_id}, contact_id={amocrm_contact_id}")
+                        
+                        # Добавляем историю переписки в AmoCRM
+                        try:
+                            chat_history_text = "\n".join([
+                                f"{'Клиент' if m['role'] == 'user' else 'Бот'}: {m['content']}"
+                                for m in history
+                            ])
+                            await amocrm_client.add_note(int(amocrm_deal_id), f"📱 История переписки:\n\n{chat_history_text}")
+                        except Exception as ne:
+                            logger.error(f"Failed to add chat history note: {ne}")
                         
                         # Отправляем уведомление менеджерам
                         msg_text = format_lead_message("telegram", user_id, lead_data, username=user.username)

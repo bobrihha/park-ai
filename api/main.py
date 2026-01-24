@@ -375,6 +375,14 @@ async def chat(request: ChatRequest):
                             msg_text = format_lead_message("web", session_id, lead_dict)
                             await send_to_birthday_channel(msg_text)
                             mark_lead_sent_to_manager(current_lead.id)
+                            # Добавляем историю переписки в AmoCRM
+                            try:
+                                chat_history_text = "\n".join(
+                                    [f"{'Клиент' if m.role == 'user' else 'Бот'}: {m.content}" for m in history]
+                                )
+                                await amocrm_client.add_note(int(deal_id), f"📱 История переписки (веб-чат):\n\n{chat_history_text}")
+                            except Exception as ne:
+                                logger.error(f"Failed to add chat history note: {ne}")
                     except Exception as e:
                         logger.error(f"Failed to send web lead to AmoCRM: {e}")
                 

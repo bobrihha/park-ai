@@ -388,6 +388,17 @@ def create_vk_bot(token: str, group_id: int):
                         msg_text = format_lead_message("vk", str(user_id), lead_dict)
                         await send_to_managers(msg_text)
                         mark_lead_sent_to_manager(lead.id)
+                        # Добавляем историю переписки в AmoCRM
+                        try:
+                            session = db.query(DBSession).filter(DBSession.telegram_id == f"vk_{user_id}").first()
+                            if session:
+                                msgs = db.query(DBMessage).filter(DBMessage.session_id == session.id).order_by(DBMessage.id).limit(30).all()
+                                chat_history_text = "\n".join(
+                                    [f"{'Клиент' if m.role == 'user' else 'Бот'}: {m.content}" for m in msgs]
+                                )
+                                await amocrm_client.add_note(int(amocrm_deal_id), f"📱 История переписки (VK):\n\n{chat_history_text}")
+                        except Exception as ne:
+                            logger.error(f"Failed to add VK chat history note: {ne}")
                 except Exception as e:
                     logger.error(f"Failed to send VK lead after phone confirm: {e}")
 
