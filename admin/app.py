@@ -10,7 +10,7 @@ import streamlit as st
 from datetime import datetime
 import os
 
-from db import init_db, SessionLocal, Document, Lead, Session as DBSession, Message, BotCommand, Client, ClientPhone, ClientChild
+from db import init_db, SessionLocal, Document, Lead, Session as DBSession, Message, BotCommand, Client, ClientPhone, ClientChild, Prompt
 from core.rag import RAGSystem
 from core.utils import format_phone
 
@@ -90,6 +90,7 @@ def icon(name: str, size: str = "sm") -> str:
         "file": '<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>',
         "send": '<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>',
         "eye": '<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>',
+        "brain": '<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M12 18v-5"/></svg>',
     }
     return icons.get(name, "")
 
@@ -139,7 +140,7 @@ if st.sidebar.button("Выйти"):
 
 
 # Сайдбар для навигации
-PAGES = ["Заявки", "Клиенты", "Диалоги", "Команды бота", "База знаний", "Настройки"]
+PAGES = ["Заявки", "Клиенты", "Диалоги", "Команды бота", "Промпты", "База знаний", "Настройки"]
 
 if "page_nav" not in st.session_state:
     st.session_state.page_nav = "Заявки"
@@ -349,6 +350,127 @@ elif page == "Команды бота":
             
     st.divider()
     st.info("Примечание: Текст ответов обновляется мгновенно. Для обновления меню может потребоваться перезапуск бота.")
+
+
+# ============ ПРОМПТЫ ============
+elif page == "Промпты":
+    st.markdown(f'{icon("brain")} <h2 style="display:inline">Системные промпты AI-агента</h2>', unsafe_allow_html=True)
+    
+    tab1, tab2 = st.tabs(["Редактирование", "Инициализация"])
+    
+    with tab1:
+        st.subheader("Активные промпты")
+        st.caption("Промпты определяют личность и поведение бота в разных сценариях.")
+        
+        db = SessionLocal()
+        prompts = db.query(Prompt).filter(Prompt.park_id == "nn").order_by(Prompt.intent).all()
+        
+        if prompts:
+            for prompt in prompts:
+                status_label = "✅" if prompt.is_active else "⚪"
+                intent_labels = {
+                    "base": "🌟 Базовый",
+                    "birthday": "🎂 День рождения",
+                    "general": "❓ Общие вопросы",
+                    "events": "🎪 Афиша",
+                    "clarification": "👋 Приветствие"
+                }
+                intent_display = intent_labels.get(prompt.intent, prompt.intent)
+                
+                with st.expander(f"{status_label} {intent_display}: {prompt.name}"):
+                    with st.form(f"edit_prompt_{prompt.id}"):
+                        new_name = st.text_input("Название", value=prompt.name)
+                        new_content = st.text_area("Текст промпта", value=prompt.content, height=400)
+                        new_is_active = st.checkbox("Активен", value=prompt.is_active)
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if st.form_submit_button("💾 Сохранить"):
+                                prompt.name = new_name
+                                prompt.content = new_content
+                                prompt.is_active = new_is_active
+                                db.commit()
+                                st.success("Промпт обновлён!")
+                                st.rerun()
+                        
+                        with col2:
+                            if st.form_submit_button("🗑️ Удалить"):
+                                db.delete(prompt)
+                                db.commit()
+                                st.warning("Промпт удалён!")
+                                st.rerun()
+        else:
+            st.warning("Промпты не найдены. Перейдите на вкладку 'Инициализация' чтобы загрузить промпты из кода.")
+        
+        db.close()
+        
+        st.divider()
+        st.subheader("➕ Добавить новый промпт")
+        
+        with st.form("new_prompt_form"):
+            new_intent = st.selectbox("Тип промпта", ["base", "birthday", "general", "events", "clarification"])
+            new_name = st.text_input("Название", placeholder="Например: Базовый промпт про парк")
+            new_content = st.text_area("Текст промпта", height=200)
+            
+            if st.form_submit_button("Добавить"):
+                if new_name and new_content:
+                    db = SessionLocal()
+                    prompt = Prompt(
+                        park_id="nn",
+                        intent=new_intent,
+                        name=new_name,
+                        content=new_content,
+                        is_active=True
+                    )
+                    db.add(prompt)
+                    db.commit()
+                    db.close()
+                    st.success("Промпт добавлен!")
+                    st.rerun()
+                else:
+                    st.error("Заполните название и текст промпта!")
+    
+    with tab2:
+        st.subheader("Загрузить промпты из кода")
+        st.caption("Эта функция загрузит текущие промпты из файла config/prompts.py в базу данных для редактирования.")
+        
+        st.warning("⚠️ Внимание: если промпты уже есть в базе, они будут перезаписаны!")
+        
+        if st.button("🔄 Инициализировать промпты из кода"):
+            try:
+                from config.prompts import BASE_SYSTEM_PROMPT, BIRTHDAY_PROMPT, GENERAL_PROMPT, EVENTS_PROMPT, CLARIFICATION_PROMPT
+                
+                db = SessionLocal()
+                
+                # Удаляем старые промпты
+                db.query(Prompt).filter(Prompt.park_id == "nn").delete()
+                
+                # Добавляем промпты из кода
+                prompts_to_add = [
+                    ("base", "Базовый промпт (личность Джуси)", BASE_SYSTEM_PROMPT),
+                    ("birthday", "День рождения — полный скрипт продажи", BIRTHDAY_PROMPT),
+                    ("general", "Общие вопросы — ответы на вопросы о парке", GENERAL_PROMPT),
+                    ("events", "Афиша — информация о мероприятиях", EVENTS_PROMPT),
+                    ("clarification", "Приветствие — первое сообщение", CLARIFICATION_PROMPT),
+                ]
+                
+                for intent, name, content in prompts_to_add:
+                    prompt = Prompt(
+                        park_id="nn",
+                        intent=intent,
+                        name=name,
+                        content=content.strip(),
+                        is_active=True
+                    )
+                    db.add(prompt)
+                
+                db.commit()
+                db.close()
+                
+                st.success(f"✅ Загружено {len(prompts_to_add)} промптов из кода!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Ошибка: {e}")
 
 
 # ============ КЛИЕНТЫ ============

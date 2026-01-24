@@ -119,11 +119,16 @@ class Lead(Base):
     status = Column(String(20), default="new")  # new, contacted, booked, cancelled
     notes = Column(Text)  # Комментарий менеджера
     
+    # AmoCRM integration
+    amocrm_deal_id = Column(String(50), index=True)  # ID сделки в AmoCRM
+    amocrm_contact_id = Column(String(50))  # ID контакта в AmoCRM
+    
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Флаги
     sent_to_manager = Column(Boolean, default=False)
+    status_notified = Column(Boolean, default=False)  # Уведомлен ли клиент о смене статуса на "Взято в работу"
     
     client = relationship("Client", back_populates="leads")
     
@@ -182,3 +187,19 @@ class BotCommand(Base):
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Prompt(Base):
+    """Системные промпты для AI-агента."""
+    __tablename__ = "prompts"
+    
+    id = Column(Integer, primary_key=True)
+    park_id = Column(String(10), default="nn", index=True)
+    intent = Column(String(30), index=True)  # base, birthday, general, events, clarification
+    name = Column(String(100))               # Название для админки
+    content = Column(Text)                   # Текст промпта
+    is_active = Column(Boolean, default=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+

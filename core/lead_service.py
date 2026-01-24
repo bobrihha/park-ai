@@ -241,13 +241,19 @@ def get_or_create_lead(user_id: str, source: str = "telegram", park_id: str = "n
     # 1. Гарантируем клиента
     client = ensure_client(db, telegram_id=tg_id, vk_id=vk_uid, username=username, first_name=first_name, last_name=last_name)
     
-    # Ищем активный лид (который ещё НЕ отправлен менеджеру)
+    # Ищем активный лид:
+    # - ИЛИ ещё не отправлен менеджеру (sent_to_manager == False)
+    # - ИЛИ уже в AmoCRM но ещё активный (есть amocrm_deal_id)
+    from sqlalchemy import or_
     lead = db.query(Lead).filter(
         Lead.telegram_id == str(user_id),
         Lead.park_id == park_id,
         Lead.status.in_(["new", "contacted"]),
-        Lead.sent_to_manager == False  # ВАЖНО: Игнорируем уже отправленные заявки
-    ).first()
+        or_(
+            Lead.sent_to_manager == False,  # Ещё не отправлен
+            Lead.amocrm_deal_id != None  # Или уже в CRM (продолжаем обновлять)
+        )
+    ).order_by(Lead.id.desc()).first()  # Берём последний
     
     if not lead:
         lead = Lead(
@@ -437,6 +443,143 @@ def mark_lead_sent_to_manager(lead_id: int) -> bool:
             logger.info(f"Lead #{lead.id} marked as sent to manager")
             return True
         return False
+    finally:
+        db.close()
+
+
+def save_amocrm_deal_id(lead_id: int, deal_id: str) -> bool:
+    """Сохранить ID сделки AmoCRM в лиде."""
+    db = SessionLocal()
+    try:
+        lead = db.query(Lead).filter(Lead.id == lead_id).first()
+        if lead:
+            lead.amocrm_deal_id = deal_id
+            lead.updated_at = datetime.utcnow()
+            db.commit()
+            logger.info(f"Lead #{lead.id} saved amocrm_deal_id={deal_id}")
+            return True
+        return False
+    finally:
+        db.close()
+
+
+def save_amocrm_contact_id(lead_id: int, contact_id: str) -> bool:
+    """Сохранить ID контакта AmoCRM в лиде."""
+    db = SessionLocal()
+    try:
+        lead = db.query(Lead).filter(Lead.id == lead_id).first()
+        if lead:
+            lead.amocrm_contact_id = contact_id
+            lead.updated_at = datetime.utcnow()
+            db.commit()
+            logger.info(f"Lead #{lead.id} saved amocrm_contact_id={contact_id}")
+            return True
+        return False
+    finally:
+        db.close()
+
+
+def mark_status_notified(lead_id: int) -> bool:
+    """Пометить что клиент уведомлён о смене статуса на 'Взято в работу'."""
+    db = SessionLocal()
+    try:
+        lead = db.query(Lead).filter(Lead.id == lead_id).first()
+        if lead:
+            lead.status_notified = True
+            lead.updated_at = datetime.utcnow()
+            db.commit()
+            logger.info(f"Lead #{lead.id} marked as status_notified")
+            return True
+        return False
+    finally:
+        db.close()
+
+
+def get_active_lead_info(user_id: int, park_id: str = "nn") -> Optional[dict]:
+    """
+    Получить информацию об активной заявке пользователя.
+    Возвращает None если нет активной заявки.
+    """
+    db = SessionLocal()
+    try:
+        from sqlalchemy import or_
+        lead = db.query(Lead).filter(
+            Lead.telegram_id == str(user_id),
+            Lead.park_id == park_id,
+            Lead.status.in_(["new", "contacted"]),
+            or_(
+                Lead.sent_to_manager == False,
+                Lead.amocrm_deal_id != None
+            )
+        ).order_by(Lead.id.desc()).first()
+        
+        if lead and lead.event_date:
+            return {
+                "lead_id": lead.id,
+                "event_date": lead.event_date,
+                "phone": lead.phone,
+                "customer_name": lead.customer_name,
+                "amocrm_deal_id": lead.amocrm_deal_id
+            }
+        return None
+    finally:
+        db.close()
+
+
+def get_last_known_phone(user_id: int) -> Optional[str]:
+    """
+    Найти последний известный телефон пользователя из ЛЮБОЙ заявки.
+    Полезно когда создаём новую бронь для существующего клиента.
+    """
+    db = SessionLocal()
+    try:
+        # Ищем любую заявку с телефоном
+        lead = db.query(Lead).filter(
+            Lead.telegram_id == str(user_id),
+            Lead.phone != None,
+            Lead.phone != ""
+        ).order_by(Lead.id.desc()).first()
+        
+        if lead and lead.phone:
+            logger.info(f"Found last known phone for user {user_id}: {lead.phone} from Lead #{lead.id}")
+            return lead.phone
+        return None
+    finally:
+        db.close()
+
+
+def force_create_new_lead(user_id: int, park_id: str = "nn", username: str = None, source: str = "telegram") -> Lead:
+    """
+    Принудительно создать новую заявку (когда юзер выбрал 'новая бронь').
+    Помечает старую заявку как completed и создаёт новую.
+    """
+    db = SessionLocal()
+    try:
+        from sqlalchemy import or_
+        # Помечаем старые активные заявки как completed
+        old_leads = db.query(Lead).filter(
+            Lead.telegram_id == str(user_id),
+            Lead.park_id == park_id,
+            Lead.status.in_(["new", "contacted"])
+        ).all()
+        
+        for old_lead in old_leads:
+            old_lead.status = "completed"
+            logger.info(f"Marked old Lead #{old_lead.id} as completed")
+        
+        # Создаём новую заявку
+        new_lead = Lead(
+            telegram_id=str(user_id),
+            park_id=park_id,
+            source=source,
+            username=username,
+            status="new"
+        )
+        db.add(new_lead)
+        db.commit()
+        db.refresh(new_lead)
+        logger.info(f"Created new Lead #{new_lead.id} for user {user_id}")
+        return new_lead
     finally:
         db.close()
 

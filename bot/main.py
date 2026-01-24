@@ -7,7 +7,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 
 from bot.handlers import (
     start_command, handle_message, button_handler, error_handler,
-    birthday_command, human_command, dynamic_command_handler, booking_command
+    birthday_command, human_command, dynamic_command_handler, booking_command,
+    hours_command, prices_command, discounts_command, events_command
 )
 from config.settings import TELEGRAM_BOT_TOKEN, VK_TOKEN, VK_GROUP_ID
 from db import init_db, SessionLocal, BotCommand as DBBotCommand
@@ -52,34 +53,19 @@ async def post_init(application):
 
 
 async def run_vk_bot_task():
-    """Запустить VK бота."""
-    print("=== VK TASK FUNCTION CALLED ===")  # Direct print for debug
-    print(f"VK_TOKEN SET: {bool(VK_TOKEN)}, VK_GROUP_ID: {VK_GROUP_ID}")
-    import sys
-    sys.stdout.flush()  # Force flush
-    
-    logger.info(f"VK bot task started. VK_TOKEN: {'SET' if VK_TOKEN else 'NOT SET'}, VK_GROUP_ID: {VK_GROUP_ID}")
-    
-    if not VK_TOKEN or VK_TOKEN == "your_vk_token_here":
-        logger.warning("VK_TOKEN not configured. VK bot will not start.")
-        return
-    
-    if not VK_GROUP_ID:
-        logger.warning("VK_GROUP_ID not configured. VK bot will not start.")
-        return
-    
-    try:
-        from bot.vk_bot import run_vk_bot as start_vk
-        logger.info(f"Starting VK bot for group {VK_GROUP_ID}...")
-        await start_vk(VK_TOKEN, int(VK_GROUP_ID))
-    except Exception as e:
-        logger.error(f"VK bot failed to start: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+    """Запустить VK бота (DISABLED)."""
+    # Эта функция больше не используется, так как VK бот запускается отдельным сервисом
+    pass
 
 
 def main():
     """Запуск ботов."""
+    try:
+        import bot.handlers
+        print(f"DEBUG: bot.handlers loaded from: {bot.handlers.__file__}", flush=True)
+    except Exception as e:
+        print(f"DEBUG: Failed to import bot.handlers: {e}", flush=True)
+
     # Проверяем токен Telegram
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "your_bot_token_here":
         logger.error("TELEGRAM_BOT_TOKEN not configured! Please set it in .env file")
@@ -107,6 +93,10 @@ def main():
     application.add_handler(CommandHandler("booking", booking_command))
     application.add_handler(CommandHandler("birthday", birthday_command))
     application.add_handler(CommandHandler("human", human_command))
+    application.add_handler(CommandHandler("hours", hours_command))
+    application.add_handler(CommandHandler("prices", prices_command))
+    application.add_handler(CommandHandler("discounts", discounts_command))
+    application.add_handler(CommandHandler("events", events_command))
     
     # Универсальный обработчик для остальных команд из БД
     application.add_handler(MessageHandler(filters.COMMAND, dynamic_command_handler))
@@ -136,9 +126,10 @@ def main():
             logger.info("Starting both bots concurrently...")
             
             # Запускаем оба бота через gather
+            # VK бот запускается отдельным сервисом (jungle-vk), поэтому здесь только Телеграм
             await asyncio.gather(
                 telegram_polling(),
-                run_vk_bot_task()
+                # run_vk_bot_task()  # DISABLED: Running via separate service
             )
     
     try:

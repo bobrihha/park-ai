@@ -1,5 +1,6 @@
 """Модуль уведомлений менеджеров."""
 import os
+import re
 import aiohttp
 import logging
 from datetime import datetime
@@ -34,6 +35,36 @@ async def send_to_managers(text: str):
                     logger.info("Manager notification sent successfully")
     except Exception as e:
         logger.error(f"Error sending notification: {e}")
+
+
+async def send_to_birthday_channel(text: str):
+    """Отправить заявку на день рождения в отдельный канал."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("BIRTHDAY_CHAT_ID")
+    
+    if not token or not chat_id:
+        logger.warning("Birthday notification failed: TELEGRAM_BOT_TOKEN or BIRTHDAY_CHAT_ID not set")
+        # Fallback: если BIRTHDAY_CHAT_ID не задан, отправляем в общий канал
+        await send_to_managers(text)
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML"
+            }
+            async with session.post(url, json=payload) as response:
+                if response.status != 200:
+                    resp_text = await response.text()
+                    logger.error(f"Failed to send birthday notification: {resp_text}")
+                else:
+                    logger.info("Birthday notification sent to dedicated channel")
+    except Exception as e:
+        logger.error(f"Error sending birthday notification: {e}")
 
 def format_lead_message(platform: str, user_id: str, lead_data: dict, username: str = None) -> str:
     """Форматирование заявки для менеджеров."""
@@ -131,9 +162,124 @@ def needs_human_escalation(message: str) -> bool:
     return any(kw in message_lower for kw in escalation_keywords)
 
 
+# ============ ФУНКЦИОНАЛ ЖАЛОБ ============
+
+def needs_complaint_flow(message: str) -> bool:
+    """Проверить, является ли сообщение жалобой на обслуживание."""
+    message_lower = message.lower()
+    
+    # Ключевые слова жалобы
+    complaint_keywords = [
+        # Прямые слова жалобы
+        "жалоба", "претензия", "недоволен", "недовольна", "недовольны",
+        "возмущен", "возмущена", "разочарован", "разочарована",
+        # Негативный опыт
+        "ужасно", "отвратительно", "кошмар", "безобразие", "хамство",
+        "неприятно", "непонятно и очень неприятно",
+        # Плохое обслуживание
+        "плохое обслуживание", "нулевое обслуживание", "ужасное обслуживание",
+        "обслуживание было нулевое",
+        "не справляется", "не справлялась", "не справлялся",
+        "не успевают", "не успевает", "долго ждали", "долго ждать",
+        # Несоответствие ожиданиям
+        "худшим решением", "худшее решение", "не стоил", "не стоило",
+        "точно не стоил", "вечер точно не стоил",
+        "не соответствует", "обманули", "не выполнили",
+        # Проблемы с бронированием/обслуживанием
+        "занято наше место", "заняли нашу комнату", "комната занята",
+        "заняли комнату", "комната занята",
+        "не предложили", "не предупредили",
+        # Запрос связи для решения
+        "связались для решения", "хочу связаться", "решить вопрос",
+        "хочу пожаловаться", "написать жалобу",
+        "связались для решения ситуации",
+        # Финансовые претензии
+        "деньги потрачены зря", "за такие деньги", "на минуточку за",
+    ]
+    
+    # Индикаторы длинных жалоб (структурированное сообщение с пунктами)
+    has_numbered_list = bool(re.search(r'^\d+\.', message, re.MULTILINE))
+    is_long_message = len(message) > 300
+    
+    # Негативные оценки опыта (для длинных сообщений)
+    negative_experience = [
+        "вечер точно не стоил", "деньги потрачены зря",
+        "это было худш", "самой вишенкой на торте было",
+        "подытожим", "в итоге опять",
+        "бегали сами", "сами убирать", "ловя официантов",
+    ]
+    
+    # Прямые совпадения
+    if any(kw in message_lower for kw in complaint_keywords):
+        return True
+    
+    # Длинное структурированное сообщение + негативный контекст
+    if is_long_message and has_numbered_list:
+        if any(kw in message_lower for kw in negative_experience):
+            return True
+    
+    # Длинное сообщение с множеством негативных слов
+    if is_long_message:
+        negative_count = sum(1 for kw in negative_experience if kw in message_lower)
+        if negative_count >= 2:
+            return True
+    
+    return False
+
+
+def format_complaint_message(
+    platform: str,
+    user_id: str,
+    user_name: str,
+    complaint_text: str,
+    phone: str = None,
+    username: str = None
+) -> str:
+    """Форматирование уведомления о жалобе для менеджеров."""
+    # Определяем источник
+    if platform == "vk":
+        source = "ВКонтакте"
+    elif platform == "web":
+        source = "Веб-чат"
+    else:
+        source = "Telegram"
+    
+    # Формируем ссылку на профиль
+    if platform == "vk":
+        user_link = f"https://vk.com/id{user_id.replace('vk_', '')}"
+        contact_info = f"<a href='{user_link}'>Открыть профиль VK</a>"
+    elif platform == "web":
+        contact_info = f"Сессия {user_id}"
+    else:
+        if username:
+            user_link = f"https://t.me/{username}"
+            contact_info = f"@{username} (<a href='{user_link}'>открыть чат</a>)"
+        else:
+            contact_info = f"ID {user_id}"
+    
+    phone_formatted = format_phone(phone) or phone or "🔥 НУЖНО ПЕРЕЗВОНИТЬ 🔥"
+    
+    # Обрезаем текст жалобы до 800 символов (жалобы важны!)
+    complaint_preview = complaint_text[:800] + "..." if len(complaint_text) > 800 else complaint_text
+    
+    msg = (
+        f"🚨 <b>#ЖАЛОБА — СРОЧНО ({source})</b>\n\n"
+        f"💬 <b>Суть жалобы:</b>\n{complaint_preview}\n\n"
+        f"👤 <b>Клиент:</b> {user_name}\n"
+        f"📱 <b>Телефон:</b> {phone_formatted}\n"
+        f"🔗 <b>Профиль:</b> {contact_info}\n\n"
+        f"⚠️ <i>Требуется срочная обратная связь!</i>\n"
+        f"🕒 <i>{datetime.now().strftime('%d.%m.%Y %H:%M')}</i>"
+    )
+    return msg
+
+
 def needs_booking_change_request(message: str) -> bool:
     """Проверить, просит ли пользователь изменить/отменить бронирование."""
     message_lower = message.lower()
+    
+    # Услуги — если упоминаются, это изменение услуг, а не отмена брони
+    services = ["торт", "аниматор", "шар", "аквагрим", "фотограф", "мастер-класс", "квест", "шоу", "пиньят", "меню"]
     
     change_keywords = [
         # Перенос/изменение даты
@@ -141,9 +287,11 @@ def needs_booking_change_request(message: str) -> bool:
         "другую дату", "другой день", "передвинуть",
         # Изменение времени
         "изменить время", "другое время", "сменить время",
-        # Отмена
-        "отменить", "отмена", "отказаться", "не приедем", "не придём", "не придем",
-        "аннулировать", "возврат",
+        # Отмена БРОНИРОВАНИЯ (только явные)
+        "отменить бронь", "отменить бронирование", "отмена брони", "отмена бронирования",
+        "отказаться от брони", "отказаться от бронирования",
+        "не приедем", "не придём", "не придем",
+        "аннулировать бронь", "возврат", "вернуть деньги",
         # Изменение гостей
         "изменить количество", "больше гостей", "меньше гостей",
         "добавить детей", "убрать детей",
@@ -156,10 +304,15 @@ def needs_booking_change_request(message: str) -> bool:
         # Контекст бронирования
         "изменить бронь", "изменить бронирование",
         "поменять бронь", "поменять бронирование",
-        "отменить бронь", "отменить бронирование",
         # Запросы с "время"/"дату" + "бронирования"
         "время бронирования", "дату бронирования",
     ]
+    
+    # Отдельно обрабатываем "отменить/убрать [услугу]" — это НЕ отмена брони
+    if any(kw in message_lower for kw in ["отменить", "убрать", "не надо", "не нужен", "не нужна"]):
+        # Если упоминается услуга — это изменение услуг, не отмена брони
+        if any(svc in message_lower for svc in services):
+            return True  # Это запрос на изменение, но услуги, не брони
     
     return any(kw in message_lower for kw in change_keywords)
 
@@ -168,7 +321,16 @@ def get_booking_change_type(message: str) -> str:
     """Определить тип изменения бронирования."""
     message_lower = message.lower()
     
-    if any(kw in message_lower for kw in ["отменить", "отмена", "отказ", "аннулир", "возврат", "не приедем", "не придём", "не придем"]):
+    # Услуги — если упоминаются вместе с "отменить/убрать", это изменение УСЛУГ
+    services = ["торт", "аниматор", "шар", "аквагрим", "фотограф", "мастер-класс", "квест", "шоу", "пиньят", "меню"]
+    
+    # СНАЧАЛА проверяем услуги — это НЕ отмена брони!
+    if any(svc in message_lower for svc in services):
+        return "Изменить услуги"
+    
+    # Теперь проверяем отмену бронирования (только если нет услуг в сообщении)
+    if any(kw in message_lower for kw in ["отменить бронь", "отменить бронирование", "отмена брони", 
+                                           "отказ", "аннулир", "возврат", "не приедем", "не придём", "не придем"]):
         return "Отмена бронирования"
     elif any(kw in message_lower for kw in ["перенести", "перенос", "дату", "день", "передвинуть"]):
         return "Изменить дату/время"
@@ -176,8 +338,6 @@ def get_booking_change_type(message: str) -> str:
         return "Изменить время"
     elif any(kw in message_lower for kw in ["гост", "детей", "количество"]):
         return "Изменить количество гостей"
-    elif any(kw in message_lower for kw in ["аниматор", "торт", "меню", "комнат", "услуг"]):
-        return "Изменить услуги"
     else:
         return "Изменение бронирования"
 
@@ -225,6 +385,19 @@ def format_booking_change_message(
 def needs_lost_item_flow(message: str) -> bool:
     """Проверить, сообщает ли пользователь о потерянной вещи."""
     message_lower = message.lower()
+    
+    # ИСКЛЮЧЕНИЯ: если это жалоба — не потеряшки!
+    complaint_context = [
+        "обслуживание", "официант", "аниматор не", "не справля",
+        "заняли комнату", "комната занята", "не предложили", 
+        "не стоил", "ужасн", "кошмар", "безобразие",
+        "недоволен", "недовольна", "жалоба", "претензия",
+        "плохо", "отвратительно", "хамство", "грубо",
+        "бегали сами", "ловя официантов", "не успевают",
+        "связались для решения", "решить вопрос",
+    ]
+    if any(kw in message_lower for kw in complaint_context):
+        return False
     
     # ИСКЛЮЧЕНИЯ: если есть контекст покупки/приобретения — это НЕ потеряшки
     buy_context = [
@@ -473,3 +646,117 @@ def format_partnership_message(
         f"🕒 <i>{datetime.now().strftime('%d.%m.%Y %H:%M')}</i>"
     )
     return msg
+
+
+# ============ ФУНКЦИОНАЛ ДОПОЛНИТЕЛЬНЫХ УСЛУГ (EXTRAS) ============
+
+# Типы доп.услуг и их эмодзи/теги
+EXTRAS_TYPES = {
+    "торт": {"emoji": "🎂", "tag": "#торт", "name": "Торт"},
+    "аниматор": {"emoji": "🎭", "tag": "#аниматор", "name": "Аниматор"},
+    "шары": {"emoji": "🎈", "tag": "#шары", "name": "Оформление шарами"},
+    "аквагрим": {"emoji": "🎨", "tag": "#аквагрим", "name": "Аквагрим"},
+    "фотограф": {"emoji": "📸", "tag": "#фотограф", "name": "Фотограф"},
+    "мастер-класс": {"emoji": "🎪", "tag": "#мастеркласс", "name": "Мастер-класс"},
+    "квест": {"emoji": "🗺️", "tag": "#квест", "name": "Квест"},
+    "шоу": {"emoji": "✨", "tag": "#шоу", "name": "Шоу-программа"},
+}
+
+
+def needs_extras_request(message: str) -> bool:
+    """
+    Проверить, запрашивает ли клиент подтверждение на добавление доп.услуги.
+    Срабатывает на явное желание добавить: "да, добавьте", "хочу торт", "заказать аниматора"
+    """
+    message_lower = message.lower()
+    
+    # Явное подтверждение добавления
+    confirm_patterns = [
+        "да, добав", "да добав", "добавьте", "добавить",
+        "хочу заказать", "закажите", "закажу",
+        "оформите", "оформить заявку",
+        "нужен", "нужна", "нужно",
+    ]
+    
+    extras_keywords = [
+        "торт", "аниматор", "шар", "аквагрим", "фотограф",
+        "мастер-класс", "мастер класс", "квест", "шоу"
+    ]
+    
+    # Паттерн: подтверждение + услуга
+    has_confirm = any(p in message_lower for p in confirm_patterns)
+    has_extras = any(e in message_lower for e in extras_keywords)
+    
+    # Простое "да" после вопроса "Добавить X?"
+    simple_yes = message_lower.strip() in ["да", "да!", "ага", "давайте", "давай", "конечно", "хочу"]
+    
+    return (has_confirm and has_extras) or simple_yes
+
+
+def get_extras_type(message: str) -> str | None:
+    """Определить тип запрашиваемой услуги."""
+    message_lower = message.lower()
+    
+    type_mapping = {
+        "торт": ["торт", "тортик", "кондитер"],
+        "аниматор": ["аниматор", "анимация", "ведущ", "клоун", "герой", "персонаж"],
+        "шары": ["шар", "оформлени", "декор", "украшени"],
+        "аквагрим": ["аквагрим", "грим", "рисунок на лице"],
+        "фотограф": ["фотограф", "фотосессия", "фотосъёмка", "фотосъемка"],
+        "мастер-класс": ["мастер-класс", "мастер класс", "мк"],
+        "квест": ["квест"],
+        "шоу": ["шоу", "мыльные пузыри", "бумаг", "крио", "азот"],
+    }
+    
+    for extra_type, keywords in type_mapping.items():
+        if any(kw in message_lower for kw in keywords):
+            return extra_type
+    
+    return None
+
+
+def format_extras_request_message(
+    platform: str,
+    user_id: str,
+    user_name: str,
+    extras_type: str,
+    deal_id: str = None,
+    phone: str = None,
+    username: str = None,
+    context: str = None
+) -> str:
+    """Форматирование уведомления о запросе доп.услуги (когда сделка уже в работе)."""
+    
+    source = "ВКонтакте" if platform == "vk" else "Telegram"
+    
+    if platform == "vk":
+        user_link = f"https://vk.com/id{user_id.replace('vk_', '')}"
+        contact_info = f"<a href='{user_link}'>Открыть профиль VK</a>"
+    else:
+        if username:
+            user_link = f"https://t.me/{username}"
+            contact_info = f"@{username} (<a href='{user_link}'>открыть чат</a>)"
+        else:
+            contact_info = f"ID {user_id}"
+    
+    phone_formatted = format_phone(phone) or phone or "Не указан"
+    
+    # Получаем данные о типе услуги
+    extras_info = EXTRAS_TYPES.get(extras_type, {"emoji": "✨", "tag": "#услуга", "name": extras_type})
+    
+    deal_text = f"🎫 <b>Сделка:</b> #{deal_id}\n" if deal_id else ""
+    context_text = f"💬 <b>Контекст:</b> {context[:200]}\n\n" if context else ""
+    
+    msg = (
+        f"{extras_info['emoji']} <b>{extras_info['tag']} — ЗАПРОС НА УСЛУГУ ({source})</b>\n\n"
+        f"{deal_text}"
+        f"✨ <b>Услуга:</b> {extras_info['name']}\n"
+        f"{context_text}"
+        f"👤 <b>Клиент:</b> {user_name}\n"
+        f"📱 <b>Телефон:</b> {phone_formatted}\n"
+        f"🔗 <b>Профиль:</b> {contact_info}\n\n"
+        f"⚠️ <i>Клиент хочет добавить услугу к существующей брони</i>\n"
+        f"🕒 <i>{datetime.now().strftime('%d.%m.%Y %H:%M')}</i>"
+    )
+    return msg
+

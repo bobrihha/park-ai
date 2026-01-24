@@ -3,26 +3,37 @@ API для веб-чата на сайте.
 Использует FastAPI для обработки сообщений.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Dict, Any
 import logging
 import uuid
+import os
+import httpx
 from datetime import datetime
 
 from core.agent import Agent
 from core.rag import RAGSystem
 from core.intent_router import detect_intent
+from core.amocrm import amocrm_client
 from db.database import SessionLocal
-from db.models import Session as DBSession, Message
+from db.models import Session as DBSession, Message, Lead
 from core.lead_service import (
     get_or_create_lead,
     update_lead_from_data,
     mark_lead_sent_to_manager,
     lead_to_dict
 )
-from core.notifications import send_to_managers, format_lead_message
+from core.notifications import (
+    send_to_managers,
+    send_to_birthday_channel,
+    format_lead_message,
+    needs_human_escalation,
+    needs_complaint_flow,
+    format_complaint_message
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,6 +43,7 @@ app = FastAPI(
     description="API для чат-виджета на сайте nn.jucity.ru",
     version="1.0.0"
 )
+
 
 # CORS - разрешаем доступ с сайта
 app.add_middleware(
@@ -48,6 +60,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Статические файлы (чат-виджет)
+import os
+from fastapi.staticfiles import StaticFiles
+STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+if os.path.exists(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
 # Инициализация компонентов
 agent = Agent()
 rag = RAGSystem()
@@ -56,11 +75,19 @@ rag = RAGSystem()
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
+    user_name: Optional[str] = None
+    user_phone: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
     reply: str
     session_id: str
+
+
+class RegisterRequest(BaseModel):
+    session_id: str
+    name: str
+    phone: str
 
 
 @app.get("/")
@@ -71,6 +98,51 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.post("/chat/register")
+async def register_user(request: RegisterRequest):
+    """
+    Регистрация пользователя из веб-чата.
+    Просто сохраняем данные для идентификации.
+    Сделка в AmoCRM создаётся только при оформлении заявки на ДР.
+    """
+    try:
+        db = SessionLocal()
+        
+        # Ищем или создаём сессию
+        session = db.query(DBSession).filter(
+            DBSession.telegram_id == request.session_id
+        ).first()
+        
+        if not session:
+            session = DBSession(
+                telegram_id=request.session_id,
+                park_id="nn",
+                intent="unknown",
+                lead_data={}
+            )
+            db.add(session)
+            db.commit()
+        
+        # Сохраняем данные пользователя в сессии
+        session.lead_data = session.lead_data or {}
+        session.lead_data["customer_name"] = request.name
+        session.lead_data["phone"] = request.phone
+        session.lead_data["web_registered"] = True
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(session, "lead_data")
+        db.commit()
+        
+        logger.info(f"Web user registered: {request.name}, {request.phone}, session={request.session_id}")
+        
+        db.close()
+        
+        return {"status": "ok"}
+        
+    except Exception as e:
+        logger.error(f"Registration error: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -110,15 +182,24 @@ async def chat(request: ChatRequest):
         db.add(user_message)
         db.commit()
         
-        # Определяем intent если ещё не определён
-        if session.intent == "unknown":
-            detected_result = detect_intent(request.message)
-            # detect_intent возвращает IntentResult, извлекаем строку
-            detected = detected_result.intent if hasattr(detected_result, 'intent') else str(detected_result)
-            if detected != "unknown":
-                session.intent = detected
-                db.commit()
-                logger.info(f"Detected intent: {detected}")
+        # Определяем intent — проверяем birthday всегда (не только если unknown)
+        intent_just_switched_to_birthday = False
+        previous_intent = session.intent
+        
+        detected_result = detect_intent(request.message)
+        detected = detected_result.intent if hasattr(detected_result, 'intent') else str(detected_result)
+        
+        # Если обнаружен birthday и ранее был не birthday — переключаемся
+        if detected == "birthday" and previous_intent != "birthday":
+            session.intent = "birthday"
+            db.commit()
+            intent_just_switched_to_birthday = True
+            logger.info(f"Intent switched to birthday from {previous_intent}")
+        # Если intent был unknown и обнаружен любой другой — устанавливаем
+        elif previous_intent == "unknown" and detected != "unknown":
+            session.intent = detected
+            db.commit()
+            logger.info(f"Detected intent: {detected}")
         
         # Получаем историю сообщений
         history = db.query(Message).filter(
@@ -136,19 +217,176 @@ async def chat(request: ChatRequest):
         
         if session.intent == "birthday":
             current_lead = get_or_create_lead(session_id, source="web", park_id="nn")
+            
+            # Используем данные из регистрации (если есть)
+            if session.lead_data and session.lead_data.get("web_registered"):
+                if not current_lead.customer_name and session.lead_data.get("customer_name"):
+                    current_lead = update_lead_from_data(current_lead.id, {
+                        "customer_name": session.lead_data.get("customer_name")
+                    })
+                if not current_lead.phone and session.lead_data.get("phone"):
+                    current_lead = update_lead_from_data(current_lead.id, {
+                        "phone": session.lead_data.get("phone")
+                    })
+            
+            # Также используем данные из запроса (если пользователь указал новые)
+            if request.user_name and not current_lead.customer_name:
+                current_lead = update_lead_from_data(current_lead.id, {"customer_name": request.user_name})
+            if request.user_phone and not current_lead.phone:
+                current_lead = update_lead_from_data(current_lead.id, {"phone": request.user_phone})
+            
+            # Извлекаем данные из сообщения
             extracted = agent.extract_lead_data(request.message, {})
             if extracted:
                 current_lead = update_lead_from_data(current_lead.id, extracted)
             lead_data = lead_to_dict(current_lead)
         
-        # Генерируем ответ
-        response = agent.generate_response(
-            message=request.message,
-            intent=session.intent,
-            rag_context=rag_context,
-            history=history_list,
-            lead_data=lead_data
-        )
+        # ============ ЖАЛОБЫ — обработка жалоб на обслуживание ============
+        if needs_complaint_flow(request.message):
+            # Получаем данные пользователя из сессии
+            user_name = session.lead_data.get("customer_name", "Не указано") if session.lead_data else "Не указано"
+            user_phone = session.lead_data.get("phone", "Не указан") if session.lead_data else "Не указан"
+            
+            # Формируем историю чата
+            chat_history_text = "\n".join([
+                f"{'Клиент' if m.role == 'user' else 'Бот'}: {m.content}"
+                for m in history
+            ])
+            
+            # Отправляем уведомление менеджерам
+            complaint_msg = format_complaint_message(
+                platform="web",
+                user_id=session_id,
+                user_name=user_name,
+                complaint_text=request.message,
+                phone=user_phone if user_phone != "Не указан" else None
+            )
+            await send_to_managers(complaint_msg)
+            logger.info(f"Complaint notification sent for web user {user_name}")
+            
+            # Если телефон уже есть
+            if user_phone != "Не указан":
+                response = (
+                    "😔 Нам очень жаль, что у вас остались негативные впечатления.\n\n"
+                    "Информация передана руководству парка. "
+                    "Мы обязательно разберёмся в ситуации и свяжемся с вами "
+                    "в ближайшее время для решения вопроса.\n\n"
+                    "Приносим извинения за доставленные неудобства. 💚"
+                )
+            else:
+                # Телефона нет — запрашиваем
+                response = (
+                    "😔 Нам очень жаль, что у вас остались негативные впечатления.\n\n"
+                    "Мы обязательно разберёмся в ситуации!\n\n"
+                    "📱 Пожалуйста, оставьте ваш номер телефона — "
+                    "руководство парка свяжется с вами для решения вопроса."
+                )
+            
+            # Сохраняем ответ и возвращаем
+            bot_message = Message(session_id=session.id, role="assistant", content=response)
+            db.add(bot_message)
+            db.commit()
+            db.close()
+            
+            return ChatResponse(reply=response, session_id=session_id)
+        # ============ КОНЕЦ ЖАЛОБЫ ============
+        
+        # ============ BIRTHDAY WELCOME — приветственное сообщение как в TG/VK ============
+        if intent_just_switched_to_birthday:
+            birthday_welcome = (
+                "💜💚 Отлично! День рождения в Джунглях — это радость и вау-эмоции! 💚💜\n\n"
+                "У нас есть 2 формата праздника — выбирайте, что подойдёт именно вам 💚\n\n"
+                "🏠 ТЕМАТИЧЕСКАЯ КОМНАТА (3 часа)\n"
+                "— предоставляется при оплате 6 полных детских билетов\n"
+                "— от 7 детей — ИМЕНИННИК БЕСПЛАТНО\n"
+                "— безлимит на аттракционы 💚\n\n"
+                "🍰 Столик в ресторане\n"
+                "— без ограничения по времени\n"
+                "— именинник — скидка 50% на вход\n"
+                "— безлимит на аттракционы 💚\n\n"
+                "✨ Аниматоры, торт, шары, аквагрим — по желанию.\n"
+                "Давайте подберём идеальный вариант для вас 💜\n\n"
+                "📅 На какую дату планируете праздник?"
+            )
+            
+            # Сохраняем ответ
+            bot_message = Message(session_id=session.id, role="assistant", content=birthday_welcome)
+            db.add(bot_message)
+            db.commit()
+            db.close()
+            
+            logger.info(f"Sent birthday welcome message for web session {session_id}")
+            return ChatResponse(reply=birthday_welcome, session_id=session_id)
+        # ============ КОНЕЦ BIRTHDAY WELCOME ============
+        
+        # Проверяем запрос живого менеджера ПЕРЕД генерацией ответа
+        is_manager_request = needs_human_escalation(request.message)
+        
+        if is_manager_request:
+            # Получаем данные пользователя из сессии
+            user_name = session.lead_data.get("customer_name", "Не указано") if session.lead_data else "Не указано"
+            user_phone = session.lead_data.get("phone", "Не указан") if session.lead_data else "Не указан"
+            
+            # Формируем специальный ответ
+            response = (
+                f"Хорошо! 📞 Передаю ваш запрос менеджеру.\\n\\n"
+                f"Мы свяжемся с вами по номеру {user_phone} в ближайшее время.\\n\\n"
+                "Если номер неактуален — напишите новый, и я передам его менеджеру."
+            )
+            
+            # Формируем историю чата
+            chat_history_text = "\\n".join([
+                f"{'Клиент' if m.role == 'user' else 'Бот'}: {m.content}"
+                for m in history
+            ])
+            
+            # Отправляем в AmoCRM
+            try:
+                from core.amocrm import send_lead_to_amocrm, AmoCRMClient
+                
+                deal_id, contact_id = await send_lead_to_amocrm(
+                    lead_data={
+                        "customer_name": user_name,
+                        "phone": user_phone,
+                        "source": "web",
+                        "notes": "Клиент запросил живого менеджера"
+                    },
+                    telegram_id=None,
+                    username=None
+                )
+                
+                if deal_id:
+                    # Добавляем историю чата как примечание
+                    try:
+                        amocrm_client = AmoCRMClient()
+                        note_text = f"📱 История переписки перед запросом менеджера:\\n\\n{chat_history_text}"
+                        await amocrm_client.add_note(int(deal_id), note_text)
+                    except Exception as ne:
+                        logger.error(f"Failed to add chat history note: {ne}")
+                    logger.info(f"Manager request sent to AmoCRM, deal_id={deal_id}")
+            except Exception as e:
+                logger.error(f"Failed to send manager request to AmoCRM: {e}")
+            
+            # Уведомляем менеджеров
+            manager_msg = (
+                f"📞 <b>ЗАПРОС ЖИВОГО МЕНЕДЖЕРА</b>\\n\\n"
+                f"👤 <b>Имя:</b> {user_name}\\n"
+                f"📱 <b>Телефон:</b> {user_phone}\\n"
+                f"🌐 <b>Источник:</b> Веб-чат\\n\\n"
+                f"💬 <b>Последние сообщения:</b>\\n"
+                f"{chat_history_text[-500:] if len(chat_history_text) > 500 else chat_history_text}"
+            )
+            await send_to_managers(manager_msg)
+            logger.info(f"Manager request notification sent for web user {user_name}")
+        else:
+            # Генерируем обычный ответ
+            response = agent.generate_response(
+                message=request.message,
+                intent=session.intent,
+                rag_context=rag_context,
+                history=history_list,
+                lead_data=lead_data
+            )
         
         # Сохраняем ответ бота
         bot_message = Message(
@@ -159,15 +397,52 @@ async def chat(request: ChatRequest):
         db.add(bot_message)
         db.commit()
         
-        # Отправляем уведомление менеджеру если нужно
+        # Отправляем уведомление менеджеру и в AmoCRM если нужно
         if current_lead and not current_lead.sent_to_manager:
             if any(x in response.lower() for x in ["передал", "передаю заявку", "менеджер свяжется", "отдел праздников"]):
-                final_data = agent.extract_lead_data(response, lead_data)
-                current_lead = update_lead_from_data(current_lead.id, final_data)
+                # НЕ извлекаем данные из ответа бота! Это вызывало баг с extras
+                # (бот говорит "аниматор, торт, шары — по желанию" и система думала что клиент их заказал)
+                # Данные уже были извлечены из сообщений пользователя в lead_data
+                current_lead = update_lead_from_data(current_lead.id, lead_data)
+                
+                # Формируем историю чата для AmoCRM
+                chat_history_text = "\\n".join([
+                    f"{'Клиент' if m.role == 'user' else 'Бот'}: {m.content}"
+                    for m in history
+                ])
+                
+                # Отправляем в AmoCRM
+                try:
+                    from core.amocrm import send_lead_to_amocrm, AmoCRMClient
+                    from core.lead_service import save_amocrm_deal_id
+                    
+                    lead_dict = lead_to_dict(current_lead)
+                    lead_dict["chat_history"] = chat_history_text
+                    deal_id, contact_id = await send_lead_to_amocrm(
+                        lead_data=lead_dict,
+                        telegram_id=None,
+                        username=None
+                    )
+                    
+                    if deal_id:
+                        save_amocrm_deal_id(current_lead.id, str(deal_id))
+                        # Добавляем историю чата как примечание
+                        try:
+                            amocrm_client = AmoCRMClient()
+                            note_text = f"📱 История переписки (веб-чат):\\n\\n{chat_history_text}"
+                            await amocrm_client.add_note(int(deal_id), note_text)
+                        except Exception as ne:
+                            logger.error(f"Failed to add chat history note: {ne}")
+                        logger.info(f"Web lead #{current_lead.id} sent to AmoCRM, deal_id={deal_id}")
+                except Exception as e:
+                    logger.error(f"Failed to send web lead to AmoCRM: {e}")
+                
+                # Уведомляем менеджеров
                 msg_text = format_lead_message("web", session_id, lead_to_dict(current_lead))
-                await send_to_managers(msg_text)
+                await send_to_birthday_channel(msg_text)
                 mark_lead_sent_to_manager(current_lead.id)
                 logger.info(f"Manager notification sent for Lead #{current_lead.id}")
+        
         
         db.close()
         
@@ -179,6 +454,154 @@ async def chat(request: ChatRequest):
     except Exception as e:
         logger.error(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# AmoCRM Integration Endpoints
+# =============================================================================
+
+@app.get("/amocrm/callback", response_class=HTMLResponse)
+async def amocrm_callback(code: Optional[str] = None, error: Optional[str] = None):
+    """
+    OAuth2 callback from AmoCRM.
+    Exchanges authorization code for access tokens.
+    """
+    if error:
+        return HTMLResponse(f"""
+            <html><body>
+            <h1>❌ Ошибка авторизации AmoCRM</h1>
+            <p>{error}</p>
+            </body></html>
+        """)
+    
+    if not code:
+        # Redirect to AmoCRM auth
+        auth_url = amocrm_client.get_auth_url()
+        return HTMLResponse(f"""
+            <html><body>
+            <h1>🔐 Авторизация AmoCRM</h1>
+            <p><a href="{auth_url}">Нажмите для авторизации</a></p>
+            </body></html>
+        """)
+    
+    # Exchange code for tokens
+    success = await amocrm_client.exchange_code_for_tokens(code)
+    
+    if success:
+        return HTMLResponse("""
+            <html><body>
+            <h1>✅ Авторизация успешна!</h1>
+            <p>AmoCRM интеграция активирована. Можете закрыть это окно.</p>
+            </body></html>
+        """)
+    else:
+        return HTMLResponse("""
+            <html><body>
+            <h1>❌ Ошибка получения токена</h1>
+            <p>Попробуйте авторизоваться снова.</p>
+            </body></html>
+        """)
+
+
+@app.post("/amocrm/webhook")
+async def amocrm_webhook(request: Request):
+    """
+    Webhook from AmoCRM for deal status changes.
+    Notifies users via Telegram when their booking is updated.
+    """
+    try:
+        # Parse form data (AmoCRM sends as form-urlencoded)
+        form_data = await request.form()
+        data = dict(form_data)
+        logger.info(f"AmoCRM webhook received: {data}")
+        
+        # Check for deal (lead) update event
+        # AmoCRM sends data like: leads[update][0][id], leads[update][0][status_id], etc.
+        
+        # Parse the webhook data
+        deal_id = None
+        new_status_id = None
+        
+        for key in data.keys():
+            if 'leads[update]' in key or 'leads[status]' in key:
+                if '[id]' in key:
+                    deal_id = data[key]
+                elif '[status_id]' in key:
+                    new_status_id = data[key]
+        
+        if not deal_id:
+            logger.info("No deal update in webhook, ignoring")
+            return {"status": "ok"}
+        
+        logger.info(f"Deal {deal_id} status changed to {new_status_id}")
+        
+        # Find lead by amocrm_deal_id
+        db = SessionLocal()
+        lead = db.query(Lead).filter(Lead.amocrm_deal_id == str(deal_id)).first()
+        
+        if not lead:
+            logger.warning(f"Lead with amocrm_deal_id={deal_id} not found")
+            db.close()
+            return {"status": "ok"}
+        
+        # Get status name (you can map status_id to names)
+        # For now, we'll fetch deal info from AmoCRM
+        deal_info = await amocrm_client.get_deal(int(deal_id))
+        
+        if deal_info:
+            status_name = deal_info.get("status_id", "неизвестен")
+            # TODO: Map status_id to human-readable name
+            
+            # Notify user via Telegram
+            telegram_id = lead.telegram_id
+            if telegram_id and telegram_id.isdigit():
+                await notify_telegram_user(
+                    telegram_id,
+                    f"📋 Обновление по вашей заявке!\n\n"
+                    f"Статус бронирования изменён.\n"
+                    f"Дата: {lead.event_date or 'не указана'}\n\n"
+                    f"Если у вас есть вопросы, напишите нам!"
+                )
+                logger.info(f"Notified user {telegram_id} about deal {deal_id} update")
+        
+        db.close()
+        return {"status": "ok"}
+        
+    except Exception as e:
+        logger.error(f"AmoCRM webhook error: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/amocrm/status")
+async def amocrm_status():
+    """Check AmoCRM integration status."""
+    return {
+        "authorized": amocrm_client.is_authorized,
+        "domain": amocrm_client.domain,
+        "auth_url": amocrm_client.get_auth_url() if not amocrm_client.is_authorized else None
+    }
+
+
+async def notify_telegram_user(chat_id: str, message: str):
+    """Send notification to user via Telegram."""
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not bot_token:
+        logger.error("TELEGRAM_BOT_TOKEN not configured")
+        return
+    
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, json={
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": "HTML"
+            })
+            if response.status_code != 200:
+                logger.error(f"Failed to send Telegram message: {response.text}")
+        except Exception as e:
+            logger.error(f"Error sending Telegram message: {e}")
 
 
 if __name__ == "__main__":

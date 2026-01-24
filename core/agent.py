@@ -1,5 +1,6 @@
 """AI Agent — основной модуль общения с пользователем."""
 
+from datetime import datetime
 from openai import OpenAI
 
 from config.settings import OPENAI_API_KEY, OPENAI_MODEL
@@ -19,7 +20,8 @@ class Agent:
         intent: str,
         history: list[dict] = None,
         rag_context: str = None,
-        lead_data: dict = None
+        lead_data: dict = None,
+        deal_in_work: bool = False
     ) -> str:
         """
         Сгенерировать ответ на сообщение пользователя.
@@ -36,6 +38,16 @@ class Agent:
         """
         # Формируем системный промпт
         system_prompt = get_system_prompt(intent)
+        
+        # Добавляем ТЕКУЩУЮ ДАТУ (чтобы бот знал день недели)
+        now = datetime.now()
+        days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+        current_date_str = now.strftime("%d.%m.%Y")
+        current_day = days[now.weekday()]
+        
+        system_prompt += f"\n\n📅 СЕГОДНЯ: {current_date_str} ({current_day})"
+        system_prompt += f"\nТекщий год: {now.year}"
+
         
         # Добавляем контекст из базы знаний
         if rag_context:
@@ -91,18 +103,20 @@ class Agent:
             
             system_prompt += "\n" + "="*50
             
-            # Определяем что ещё нужно собрать
+            # Определяем что ещё нужно собрать (ПОРЯДОК ВАЖЕН!)
+            # После дата + дети + телефон → создаём заявку в CRM и продолжаем собирать данные
             missing = []
             if not lead_data.get("event_date"):
                 missing.append("Дата праздника")
             if not lead_data.get("kids_count"):
-                missing.append("Количество детей")
+                missing.append("Количество детей (включая именинника)")
+            if not lead_data.get("phone"):
+                missing.append("Номер телефона для связи")
+            # После получения телефона — заявка уходит в CRM, но мы продолжаем собирать данные
+            if not lead_data.get("format"):
+                missing.append("Формат праздника (Тематическая комната или Ресторан)")
             if not lead_data.get("time"):
                 missing.append("Время начала (10:30, 14:30 или 18:30)")
-            if not lead_data.get("customer_name"):
-                missing.append("Имя для связи")
-            if not lead_data.get("phone"):
-                missing.append("Номер телефона")
             
             if missing:
                 # Указываем СЛЕДУЮЩИЙ КОНКРЕТНЫЙ вопрос
@@ -173,7 +187,13 @@ class Agent:
         if current_data is None:
             current_data = {}
         
+        # Добавляем контекст даты
+        now = datetime.now()
+        days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+        date_context = f"СЕГОДНЯ: {now.strftime('%d.%m.%Y')} ({days[now.weekday()]})"
+        
         prompt = f"""Извлеки информацию о бронировании праздника из сообщения.
+{date_context}
 
 Сообщение: "{message}"
 
