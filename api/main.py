@@ -13,6 +13,7 @@ import uuid
 import os
 import httpx
 from datetime import datetime
+import re
 
 from core.agent import Agent
 from core.rag import RAGSystem
