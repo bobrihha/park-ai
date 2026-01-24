@@ -353,3 +353,56 @@ def parse_kids_count(text: str, max_count: int = 60) -> Optional[int]:
         return n if 1 <= n <= max_count else None
 
     return None
+
+
+def filter_extras_from_message(
+    message: str,
+    extras: list[str] | None,
+    last_bot_message: str | None = None,
+) -> list[str]:
+    """Filter extras so they are added only on explicit order or confirmed add."""
+    if not extras:
+        return []
+
+    text = (message or "").lower()
+    bot_text = (last_bot_message or "").lower()
+
+    # Explicit order intent words
+    order_keywords = [
+        "заказать", "закажу", "закажем", "закажите",
+        "хочу", "хотим",
+        "нужен", "нужна", "нужно",
+        "добавьте", "добавить",
+        "возьмем", "возьмём", "берем", "берём",
+        "оформить", "оформим",
+    ]
+
+    # Question/permission patterns -> not an order
+    question_block = [
+        "можно", "можно ли", "разрешено",
+        "нужен ли", "нужна ли", "нужно ли",
+        "свой торт", "со своим тортом", "принести торт", "принесем торт", "принесём торт",
+        "торт с собой", "торт с собой можно",
+    ]
+
+    simple_yes = text.strip() in ["да", "да!", "ага", "ок", "окей", "конечно", "давайте", "давай", "хочу"]
+    has_order_intent = any(k in text for k in order_keywords)
+    has_question = any(k in text for k in question_block)
+
+    if has_question:
+        return []
+
+    # Extras explicitly mentioned by user
+    mentioned = [e for e in extras if e and e.lower() in text]
+    if mentioned and (has_order_intent or simple_yes):
+        return mentioned
+
+    # Allow confirmation like "да/закажите" if bot just asked to add a specific extra
+    if (has_order_intent or simple_yes) and bot_text:
+        bot_has_order_prompt = any(k in bot_text for k in ["добав", "заказ", "оформ"])
+        if bot_has_order_prompt:
+            bot_mentions = [e for e in extras if e and e.lower() in bot_text]
+            if bot_mentions:
+                return bot_mentions
+
+    return []

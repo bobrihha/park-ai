@@ -111,6 +111,7 @@ from core.utils import (
     format_date_ru,
     build_birthday_date_question,
     parse_kids_count,
+    filter_extras_from_message,
 )
 
 
@@ -2277,6 +2278,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             full_conversation = "\n".join(user_messages)
             
             extracted = agent.extract_lead_data(full_conversation, current_lead_data)
+            if extracted and "extras" in extracted:
+                last_bot_message = next(
+                    (msg["content"] for msg in reversed(history) if msg["role"] == "assistant"),
+                    ""
+                )
+                filtered_extras = filter_extras_from_message(
+                    message_text,
+                    extracted.get("extras"),
+                    last_bot_message=last_bot_message
+                )
+                if filtered_extras:
+                    extracted["extras"] = filtered_extras
+                else:
+                    extracted.pop("extras", None)
             
             # Обновляем Lead в БД
             if extracted:

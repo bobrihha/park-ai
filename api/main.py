@@ -19,7 +19,13 @@ from core.rag import RAGSystem
 from core.intent_router import detect_intent
 from core.amocrm import amocrm_client
 from core.messages import BIRTHDAY_WELCOME_MESSAGE
-from core.utils import parse_user_date, format_date_ru, build_birthday_date_question, parse_kids_count
+from core.utils import (
+    parse_user_date,
+    format_date_ru,
+    build_birthday_date_question,
+    parse_kids_count,
+    filter_extras_from_message,
+)
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message, Lead
 from core.lead_service import (
@@ -239,6 +245,21 @@ async def chat(request: ChatRequest):
             
             # Извлекаем данные из сообщения
             extracted = agent.extract_lead_data(request.message, {})
+            if extracted and "extras" in extracted:
+                last_bot_message = ""
+                for msg in reversed(history):
+                    if msg.role == "assistant":
+                        last_bot_message = msg.content
+                        break
+                filtered_extras = filter_extras_from_message(
+                    request.message,
+                    extracted.get("extras"),
+                    last_bot_message=last_bot_message
+                )
+                if filtered_extras:
+                    extracted["extras"] = filtered_extras
+                else:
+                    extracted.pop("extras", None)
             if extracted:
                 current_lead = update_lead_from_data(current_lead.id, extracted)
             lead_data = lead_to_dict(current_lead)
