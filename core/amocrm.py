@@ -960,9 +960,13 @@ class AmoCRMClient:
     
     def get_auth_url(self) -> str:
         """Get authorization URL for initial OAuth2 flow."""
+        from urllib.parse import quote
+        redirect = quote(self.redirect_uri or "", safe="")
         return (
             f"{self.base_url}/oauth"
             f"?client_id={self.client_id}"
+            f"&redirect_uri={redirect}"
+            f"&response_type=code"
             f"&mode=post_message"
         )
 
@@ -1014,4 +1018,3 @@ async def send_lead_to_amocrm(lead_data: Dict[str, Any], telegram_id: int = None
     except Exception as e:
         logger.error(f"Error sending lead to AmoCRM: {e}")
         return None, None
-
