@@ -32,6 +32,7 @@ from core.utils import (
 )
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message, Lead
+from sqlalchemy.orm.attributes import flag_modified
 from core.lead_service import (
     get_or_create_lead,
     update_lead_from_data,
@@ -343,10 +344,12 @@ async def chat(request: ChatRequest):
                 if text in yes_words:
                     session.lead_data["phone_confirmed"] = True
                     session.lead_data.pop("pending_phone_confirm", None)
+                    flag_modified(session, "lead_data")
                     db.commit()
                 elif text in no_words:
                     session.lead_data.pop("pending_phone_confirm", None)
                     session.lead_data["phone_confirmed"] = False
+                    flag_modified(session, "lead_data")
                     db.commit()
                     response = "📱 Хорошо! Укажите актуальный номер телефона для связи:"
                     bot_message = Message(session_id=session.id, role="assistant", content=response)
@@ -363,6 +366,7 @@ async def chat(request: ChatRequest):
                 lead_data = lead_to_dict(current_lead)
                 session.lead_data = session.lead_data or {}
                 session.lead_data["force_kids"] = True
+                flag_modified(session, "lead_data")
                 db.commit()
                 response = build_birthday_date_question(parsed_date)
                 bot_message = Message(session_id=session.id, role="assistant", content=response)
@@ -380,6 +384,7 @@ async def chat(request: ChatRequest):
                     lead_data = lead_to_dict(current_lead)
                     if session.lead_data:
                         session.lead_data.pop("force_kids", None)
+                        flag_modified(session, "lead_data")
                         db.commit()
 
             if lead_data and lead_data.get("event_date") and (force_kids or not lead_data.get("kids_count")):
@@ -400,6 +405,7 @@ async def chat(request: ChatRequest):
                     lead_data = lead_to_dict(current_lead)
                     session.lead_data = session.lead_data or {}
                     session.lead_data["phone_confirmed"] = True
+                    flag_modified(session, "lead_data")
                     db.commit()
 
             # Если пользователь выбрал формат — фиксируем без LLM
@@ -425,6 +431,7 @@ async def chat(request: ChatRequest):
             # Если телефон есть, но не подтвержден — запросить подтверждение
             if lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and phone_value and not phone_confirmed and not pending_phone:
                 session.lead_data["pending_phone_confirm"] = phone_value
+                flag_modified(session, "lead_data")
                 db.commit()
                 response = f"📱 Актуален ли этот номер телефона для связи?\n{phone_value}\n\nОтветьте: да/нет."
                 bot_message = Message(session_id=session.id, role="assistant", content=response)
@@ -438,6 +445,7 @@ async def chat(request: ChatRequest):
                 if should_defer_phone_request(request.message):
                     session.lead_data = session.lead_data or {}
                     session.lead_data["defer_phone_request"] = True
+                    flag_modified(session, "lead_data")
                     db.commit()
                 else:
                     response = "📱 Оставьте номер телефона для связи:"
@@ -583,6 +591,7 @@ async def chat(request: ChatRequest):
                 if session.lead_data and session.lead_data.get("defer_phone_request"):
                     defer_phone = True
                     session.lead_data.pop("defer_phone_request", None)
+                    flag_modified(session, "lead_data")
                     db.commit()
                 if defer_phone and lead_data and not lead_data.get("phone"):
                     if "телефон" not in response.lower() and "номер" not in response.lower():
