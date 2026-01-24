@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from datetime import datetime, timedelta, date
 
 def get_prices_from_knowledge(park_id: str = "nn") -> dict:
     """
@@ -149,3 +150,171 @@ def get_afisha_events(park_id: str = "nn") -> str:
     except Exception as e:
         print(f"Error parsing afisha: {e}")
         return None
+
+
+# ====== Date helpers for birthday flow ======
+
+_MONTHS_RU_TO_NUM = {
+    "января": 1, "янв": 1,
+    "февраля": 2, "фев": 2,
+    "марта": 3, "мар": 3,
+    "апреля": 4, "апр": 4,
+    "мая": 5, "май": 5,
+    "июня": 6, "июн": 6,
+    "июля": 7, "июл": 7,
+    "августа": 8, "авг": 8,
+    "сентября": 9, "сен": 9, "сент": 9,
+    "октября": 10, "окт": 10,
+    "ноября": 11, "ноя": 11,
+    "декабря": 12, "дек": 12,
+}
+
+_MONTHS_NUM_TO_RU = {
+    1: "января",
+    2: "февраля",
+    3: "марта",
+    4: "апреля",
+    5: "мая",
+    6: "июня",
+    7: "июля",
+    8: "августа",
+    9: "сентября",
+    10: "октября",
+    11: "ноября",
+    12: "декабря",
+}
+
+_WEEKDAYS_RU = [
+    "понедельник",
+    "вторник",
+    "среда",
+    "четверг",
+    "пятница",
+    "суббота",
+    "воскресенье",
+]
+
+_HOLIDAYS = {
+    (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7), (1, 8),
+    (2, 23),
+    (3, 8),
+    (5, 1), (5, 9),
+    (6, 12),
+    (11, 4),
+}
+
+
+def _next_weekday(start_date: date, target_weekday: int) -> date:
+    days_ahead = (target_weekday - start_date.weekday()) % 7
+    return start_date + timedelta(days=days_ahead)
+
+
+def parse_user_date(text: str, now: datetime | None = None) -> date | None:
+    """Parse user message and return a date if possible."""
+    if not text:
+        return None
+
+    now_dt = now or datetime.now()
+    today = now_dt.date()
+    t = text.lower()
+
+    if "послезавтра" in t:
+        return today + timedelta(days=2)
+    if "завтра" in t:
+        return today + timedelta(days=1)
+    if "сегодня" in t:
+        return today
+
+    # Day of week (e.g. "в субботу")
+    for idx, name in enumerate(_WEEKDAYS_RU):
+        if re.search(rf"\\b{name}\\b", t):
+            return _next_weekday(today, idx)
+
+    # "на выходных"
+    if "выходн" in t:
+        if today.weekday() in (5, 6):
+            return today
+        return _next_weekday(today, 5)
+
+    # Numeric formats: dd.mm.yyyy, dd/mm/yyyy, dd-mm-yyyy
+    match = re.search(r"(\\d{1,2})[./-](\\d{1,2})[./-](\\d{4})", t)
+    if match:
+        day, month, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+
+    # Numeric formats without year: dd.mm or dd/mm or dd-mm
+    match = re.search(r"(\\d{1,2})[./-](\\d{1,2})", t)
+    if match:
+        day, month = int(match.group(1)), int(match.group(2))
+        year = today.year
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            return None
+        if candidate < today:
+            try:
+                candidate = date(year + 1, month, day)
+            except ValueError:
+                return None
+        return candidate
+
+    # "25 января" / "25 янв 2026"
+    match = re.search(r"(\\d{1,2})\\s*([а-яё]+)(?:\\s*(\\d{4}))?", t)
+    if match:
+        day = int(match.group(1))
+        month_name = match.group(2)
+        year = int(match.group(3)) if match.group(3) else today.year
+        month = _MONTHS_RU_TO_NUM.get(month_name)
+        if month:
+            try:
+                candidate = date(year, month, day)
+            except ValueError:
+                return None
+            if not match.group(3) and candidate < today:
+                try:
+                    candidate = date(year + 1, month, day)
+                except ValueError:
+                    return None
+            return candidate
+
+    return None
+
+
+def format_date_ru(d: date, include_year: bool = False) -> str:
+    month_name = _MONTHS_NUM_TO_RU.get(d.month, str(d.month))
+    if include_year:
+        return f"{d.day} {month_name} {d.year}"
+    return f"{d.day} {month_name}"
+
+
+def format_weekday_ru(d: date, capitalize: bool = False) -> str:
+    name = _WEEKDAYS_RU[d.weekday()]
+    return name.capitalize() if capitalize else name
+
+
+def is_holiday(d: date) -> bool:
+    return (d.month, d.day) in _HOLIDAYS
+
+
+def get_birthday_price_for_date(d: date, prices: dict | None = None) -> int:
+    prices = prices or get_prices_from_knowledge()
+    if is_holiday(d):
+        return prices["weekend"]
+    if d.weekday() == 0:
+        return prices["monday"]
+    if d.weekday() in (5, 6):
+        return prices["weekend"]
+    return prices["weekday"]
+
+
+def build_birthday_date_question(d: date, prices: dict | None = None) -> str:
+    price = get_birthday_price_for_date(d, prices)
+    date_str = format_date_ru(d, include_year=True)
+    weekday = format_weekday_ru(d, capitalize=False)
+    return (
+        f"📅 {date_str} — это {weekday}, цена детского билета {price} ₽.\n\n"
+        "👶 Сколько детей будет всего, включая именинника?"
+    )

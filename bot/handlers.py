@@ -104,7 +104,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-from core.utils import get_prices_from_knowledge, get_afisha_events
+from core.utils import (
+    get_prices_from_knowledge,
+    get_afisha_events,
+    parse_user_date,
+    format_date_ru,
+    build_birthday_date_question,
+)
 
 
 async def prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2219,9 +2225,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Перечитываем lead из БД чтобы получить актуальные данные (включая телефон)
             current_lead = db.query(Lead).filter(Lead.id == current_lead.id).first()
             
+            lead_data = lead_to_dict(current_lead)
+
+            # Если дата ещё не сохранена — пытаемся распарсить из последнего сообщения
+            if not lead_data.get("event_date"):
+                parsed_date = parse_user_date(message_text)
+                if parsed_date:
+                    normalized_date = format_date_ru(parsed_date, include_year=False)
+                    current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
+                    lead_data = lead_to_dict(current_lead)
+
+            # Если дата есть, но детей ещё нет — задаём следующий вопрос с ценой
+            if lead_data.get("event_date") and not lead_data.get("kids_count"):
+                date_obj = parse_user_date(lead_data["event_date"]) or parse_user_date(message_text)
+                if date_obj:
+                    response_text = build_birthday_date_question(date_obj)
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=response_text
+                    )
+                    return
+            
             # Проверяем: нужно подтвердить телефон для нового бронирования?
             pending_phone = context.user_data.get("pending_phone_confirm")
-            lead_data = lead_to_dict(current_lead)
             
             # Если есть pending телефон И только что получили kids_count — спрашиваем
             if pending_phone and extracted and extracted.get("kids_count") and not lead_data.get("phone"):

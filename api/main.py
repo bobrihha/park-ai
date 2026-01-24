@@ -19,6 +19,7 @@ from core.rag import RAGSystem
 from core.intent_router import detect_intent
 from core.amocrm import amocrm_client
 from core.messages import BIRTHDAY_WELCOME_MESSAGE
+from core.utils import parse_user_date, format_date_ru, build_birthday_date_question
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message, Lead
 from core.lead_service import (
@@ -305,6 +306,28 @@ async def chat(request: ChatRequest):
             logger.info(f"Sent birthday welcome message for web session {session_id}")
             return ChatResponse(reply=birthday_welcome, session_id=session_id)
         # ============ КОНЕЦ BIRTHDAY WELCOME ============
+
+        # ============ BIRTHDAY DATE STEP — фиксированный вопрос про детей ============
+        if session.intent == "birthday":
+            # Если дата ещё не сохранена — пытаемся распарсить из сообщения
+            if lead_data is not None and not lead_data.get("event_date"):
+                parsed_date = parse_user_date(request.message)
+                if parsed_date and current_lead:
+                    normalized_date = format_date_ru(parsed_date, include_year=False)
+                    current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
+                    lead_data = lead_to_dict(current_lead)
+
+            # Если дата есть, но детей ещё нет — задаём следующий вопрос с ценой
+            if lead_data and lead_data.get("event_date") and not lead_data.get("kids_count"):
+                date_obj = parse_user_date(lead_data["event_date"]) or parse_user_date(request.message)
+                if date_obj:
+                    response = build_birthday_date_question(date_obj)
+                    bot_message = Message(session_id=session.id, role="assistant", content=response)
+                    db.add(bot_message)
+                    db.commit()
+                    db.close()
+                    return ChatResponse(reply=response, session_id=session_id)
+        # ============ КОНЕЦ BIRTHDAY DATE STEP ============
         
         # Проверяем запрос живого менеджера ПЕРЕД генерацией ответа
         is_manager_request = needs_human_escalation(request.message)
