@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import chromadb
+from chromadb.errors import NotFoundError
 from chromadb.utils import embedding_functions
 
 from config.settings import KNOWLEDGE_DIR, BASE_DIR
@@ -13,6 +14,7 @@ class RAGSystem:
     
     def __init__(self, park_id: str = "nn"):
         self.park_id = park_id
+        self.collection_name = f"knowledge_{park_id}"
         
         # Инициализируем ChromaDB
         persist_dir = BASE_DIR / "data" / "chroma"
@@ -29,9 +31,17 @@ class RAGSystem:
         
         # Получаем или создаём коллекцию
         self.collection = self.client.get_or_create_collection(
-            name=f"knowledge_{park_id}",
+            name=self.collection_name,
             embedding_function=self.embedding_fn,
             metadata={"park_id": park_id}
+        )
+
+    def _reload_collection(self):
+        """Re-open collection if it was deleted/recreated while process is running."""
+        self.collection = self.client.get_or_create_collection(
+            name=self.collection_name,
+            embedding_function=self.embedding_fn,
+            metadata={"park_id": self.park_id}
         )
     
     def add_document(self, doc_id: str, content: str, category: str, title: str = ""):
@@ -61,11 +71,20 @@ class RAGSystem:
         elif intent == "general":
             where_filter = {"$or": [{"category": "general"}, {"category": "shared"}, {"category": "services"}]}
         
-        results = self.collection.query(
-            query_texts=[query],
-            n_results=n_results,
-            where=where_filter
-        )
+        try:
+            results = self.collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                where=where_filter
+            )
+        except NotFoundError:
+            # Collection was dropped/reindexed while running; reopen and retry once
+            self._reload_collection()
+            results = self.collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                where=where_filter
+            )
         
         documents = []
         if results["documents"] and results["documents"][0]:
