@@ -960,13 +960,14 @@ class AmoCRMClient:
     
     def get_auth_url(self) -> str:
         """Get authorization URL for initial OAuth2 flow."""
-        from urllib.parse import quote
-        redirect = quote(self.redirect_uri or "", safe="")
+        # AmoCRM docs: use www.amocrm.ru (or .com) with client_id + state + mode
+        domain = "www.amocrm.ru"
+        if self.domain.endswith(".amocrm.com") or self.domain.endswith(".kommo.com"):
+            domain = "www.amocrm.com"
         return (
-            f"{self.base_url}/oauth"
+            f"https://{domain}/oauth"
             f"?client_id={self.client_id}"
-            f"&redirect_uri={redirect}"
-            f"&response_type=code"
+            f"&state=manual"
             f"&mode=post_message"
         )
 
