@@ -30,6 +30,7 @@ from core.utils import (
     extract_phone_from_message,
     extract_format_from_message,
     build_format_choice_message,
+    parse_time_from_message,
 )
 from db.database import SessionLocal
 from db.models import Session as DBSession, Message, Lead
@@ -236,6 +237,37 @@ async def chat(request: ChatRequest):
             db.commit()
             logger.info(f"Detected intent: {detected}")
         
+        # Ранний флаг: пользователь явно хочет начать новую бронь
+        start_new_booking = False
+        text_lower = request.message.lower().strip()
+        change_keywords = ["изменить", "перенести", "поменять", "другую дату", "сменить"]
+        start_keywords = ["хочу организовать", "хочу забронировать", "забронировать праздник", "организовать день рождения", "хочу праздник"]
+        start_new_booking = any(k in text_lower for k in start_keywords) and not any(k in text_lower for k in change_keywords)
+
+        # Если нужно начать новую бронь — переключаем intent и создаём новый лид сразу
+        current_lead = None
+        lead_data = {}
+        fresh_lead = False
+        if start_new_booking:
+            if session.intent != "birthday":
+                session.intent = "birthday"
+                db.commit()
+            current_lead = force_create_new_lead(session_id, park_id="nn", source="web")
+            current_lead = _refresh_lead(db, current_lead)
+            lead_data = lead_to_dict(current_lead) if current_lead else {}
+            # Сбросим служебные флаги, сохраняя данные регистрации
+            preserved = {}
+            if session.lead_data and session.lead_data.get("web_registered"):
+                preserved = {
+                    "web_registered": True,
+                    "customer_name": session.lead_data.get("customer_name"),
+                    "phone": session.lead_data.get("phone"),
+                }
+            session.lead_data = preserved
+            flag_modified(session, "lead_data")
+            db.commit()
+            fresh_lead = True
+
         # Получаем историю сообщений
         history = db.query(Message).filter(
             Message.session_id == session.id
@@ -245,14 +277,17 @@ async def chat(request: ChatRequest):
         
         # Получаем RAG контекст
         rag_context = rag.get_context(request.message, session.intent)
+
+        # Предварительный разбор даты (нужен для приветствия и шагов сценария)
+        parsed_date_in_message = None
+        if session.intent == "birthday" or intent_just_switched_to_birthday or start_new_booking:
+            parsed_date_in_message = parse_user_date(request.message)
         
         # Для birthday — работаем с Lead
-        lead_data = {}
-        current_lead = None
-        
         if session.intent == "birthday":
-            current_lead = get_or_create_lead(session_id, source="web", park_id="nn")
-            current_lead = _refresh_lead(db, current_lead)
+            if not current_lead:
+                current_lead = get_or_create_lead(session_id, source="web", park_id="nn")
+                current_lead = _refresh_lead(db, current_lead)
             
             # Используем данные из регистрации (если есть)
             if session.lead_data and session.lead_data.get("web_registered"):
@@ -275,7 +310,7 @@ async def chat(request: ChatRequest):
                 current_lead = update_lead_from_data(current_lead.id, {"phone": request.user_phone})
                 current_lead = _refresh_lead(db, current_lead)
             
-            # Извлекаем данные из сообщения
+            # Извлекаем данные из сообщения (но не трогаем extras при старте новой брони)
             extracted = agent.extract_lead_data(request.message, {})
             if extracted and "extras" in extracted:
                 last_bot_message = ""
@@ -292,6 +327,12 @@ async def chat(request: ChatRequest):
                     extracted["extras"] = filtered_extras
                 else:
                     extracted.pop("extras", None)
+            # Если пользователь прислал время — фиксируем его и не даём LLM переписать дату
+            time_candidate = parse_time_from_message(request.message)
+            if time_candidate:
+                extracted = extracted or {}
+                extracted["time"] = time_candidate
+                extracted.pop("event_date", None)
             if extracted:
                 current_lead = update_lead_from_data(current_lead.id, extracted)
                 current_lead = _refresh_lead(db, current_lead)
@@ -348,7 +389,7 @@ async def chat(request: ChatRequest):
         # ============ КОНЕЦ ЖАЛОБЫ ============
         
         # ============ BIRTHDAY WELCOME — приветственное сообщение как в TG/VK ============
-        if intent_just_switched_to_birthday:
+        if (intent_just_switched_to_birthday or start_new_booking) and not parsed_date_in_message:
             birthday_welcome = BIRTHDAY_WELCOME_MESSAGE
             
             # Сохраняем ответ
@@ -363,28 +404,8 @@ async def chat(request: ChatRequest):
 
         # ============ BIRTHDAY DATE STEP — фиксированный вопрос про детей ============
         if session.intent == "birthday":
-            # --- Если пользователь явно хочет начать новую бронь — создаём новый lead ---
-            text_lower = request.message.lower().strip()
-            change_keywords = ["изменить", "перенести", "поменять", "другую дату", "сменить"]
-            start_keywords = ["хочу организовать", "хочу забронировать", "забронировать праздник", "организовать день рождения", "хочу праздник"]
-            start_new_booking = any(k in text_lower for k in start_keywords) and not any(k in text_lower for k in change_keywords)
-            if start_new_booking and current_lead:
-                current_lead = force_create_new_lead(session_id, park_id="nn", source="web")
-                current_lead = _refresh_lead(db, current_lead)
-                lead_data = lead_to_dict(current_lead)
-                # Сбросим служебные флаги, сохраняя данные регистрации
-                preserved = {}
-                if session.lead_data and session.lead_data.get("web_registered"):
-                    preserved = {
-                        "web_registered": True,
-                        "customer_name": session.lead_data.get("customer_name"),
-                        "phone": session.lead_data.get("phone"),
-                    }
-                session.lead_data = preserved
-                flag_modified(session, "lead_data")
-                db.commit()
-
             # --- Обработка подтверждения телефона (web) ---
+            session.lead_data = session.lead_data or {}
             last_bot_message = ""
             for msg in reversed(history):
                 if msg.role == "assistant":
@@ -393,24 +414,51 @@ async def chat(request: ChatRequest):
             asked_phone_confirm = "актуален ли этот номер" in last_bot_message
 
             def _is_yes(t: str) -> bool:
-                return bool(re.search(r"\bда\b|ага|конечно|верно|правильно|ок\b|окей", t))
+                return bool(re.fullmatch(r"(да|ага|конечно|верно|правильно|ок|окей)", t))
 
             def _is_no(t: str) -> bool:
-                return bool(re.search(r"\bнет\b|неа|неверно|неправильно", t))
+                return bool(re.fullmatch(r"(нет|неа|неверно|неправильно)", t))
 
             phone_confirmed_override = False
-
-            if (session.lead_data and session.lead_data.get("pending_phone_confirm")) or asked_phone_confirm:
-                pending_phone = session.lead_data.get("pending_phone_confirm") if session.lead_data else None
-                # Если pending не задан, но бот только что спросил — используем телефон из лида
-                if not pending_phone and lead_data and lead_data.get("phone"):
-                    pending_phone = lead_data.get("phone")
-                    session.lead_data = session.lead_data or {}
-                    session.lead_data["pending_phone_confirm"] = pending_phone
+            awaiting_phone_input = session.lead_data.get("awaiting_phone_input")
+            if awaiting_phone_input:
+                phone_candidate = extract_phone_from_message(request.message)
+                if phone_candidate and current_lead:
+                    current_lead = update_lead_from_data(current_lead.id, {"phone": phone_candidate})
+                    current_lead = _refresh_lead(db, current_lead)
+                    lead_data = lead_to_dict(current_lead)
+                    session.lead_data["phone_confirmed"] = True
+                    session.lead_data.pop("awaiting_phone_input", None)
                     flag_modified(session, "lead_data")
                     db.commit()
+                    phone_confirmed_override = True
+                else:
+                    session.lead_data["defer_phone_request"] = True
+                    flag_modified(session, "lead_data")
+                    db.commit()
+            pending_phone = session.lead_data.get("pending_phone_confirm")
+            if (not pending_phone and not session.lead_data.get("awaiting_phone_input") and asked_phone_confirm
+                and lead_data and lead_data.get("phone") and not session.lead_data.get("phone_confirmed")):
+                pending_phone = lead_data.get("phone")
+                session.lead_data["pending_phone_confirm"] = pending_phone
+                flag_modified(session, "lead_data")
+                db.commit()
+
+            if pending_phone:
                 text = request.message.strip().lower()
-                if _is_yes(text):
+                phone_candidate = extract_phone_from_message(request.message)
+                if phone_candidate:
+                    if current_lead:
+                        current_lead = update_lead_from_data(current_lead.id, {"phone": phone_candidate})
+                        current_lead = _refresh_lead(db, current_lead)
+                        lead_data = lead_to_dict(current_lead)
+                    session.lead_data["phone_confirmed"] = True
+                    session.lead_data.pop("pending_phone_confirm", None)
+                    session.lead_data.pop("awaiting_phone_input", None)
+                    flag_modified(session, "lead_data")
+                    db.commit()
+                    phone_confirmed_override = True
+                elif _is_yes(text):
                     session.lead_data["phone_confirmed"] = True
                     session.lead_data.pop("pending_phone_confirm", None)
                     flag_modified(session, "lead_data")
@@ -419,6 +467,7 @@ async def chat(request: ChatRequest):
                 elif _is_no(text):
                     session.lead_data.pop("pending_phone_confirm", None)
                     session.lead_data["phone_confirmed"] = False
+                    session.lead_data["awaiting_phone_input"] = True
                     flag_modified(session, "lead_data")
                     db.commit()
                     response = "📱 Хорошо! Укажите актуальный номер телефона для связи:"
@@ -428,17 +477,13 @@ async def chat(request: ChatRequest):
                     db.close()
                     return ChatResponse(reply=response, session_id=session_id)
                 else:
-                    # Не распознали ответ — повторяем подтверждение и выходим
-                    if pending_phone:
-                        response = f"📱 Актуален ли этот номер телефона для связи?\n{pending_phone}\n\nОтветьте: да/нет."
-                        bot_message = Message(session_id=session.id, role="assistant", content=response)
-                        db.add(bot_message)
-                        db.commit()
-                        db.close()
-                        return ChatResponse(reply=response, session_id=session_id)
+                    # Не распознали ответ — отвечаем и затем повторяем подтверждение
+                    session.lead_data["defer_phone_confirm"] = True
+                    flag_modified(session, "lead_data")
+                    db.commit()
 
             # Если в сообщении есть дата — фиксируем и сразу спрашиваем про детей
-            parsed_date = parse_user_date(request.message)
+            parsed_date = parsed_date_in_message or parse_user_date(request.message)
             if parsed_date and current_lead:
                 normalized_date = format_date_ru(parsed_date, include_year=False)
                 current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
@@ -457,6 +502,7 @@ async def chat(request: ChatRequest):
 
             # Если дата есть, но детей ещё нет — задаём следующий вопрос с ценой
             force_kids = session.lead_data.get("force_kids") if session.lead_data else None
+            defer_kids_request = False
             if lead_data and lead_data.get("event_date") and (force_kids or not lead_data.get("kids_count")):
                 kids_count = parse_kids_count(request.message)
                 if kids_count and current_lead:
@@ -467,8 +513,15 @@ async def chat(request: ChatRequest):
                         session.lead_data.pop("force_kids", None)
                         flag_modified(session, "lead_data")
                         db.commit()
+                    force_kids = False
+                elif request.message.strip():
+                    session.lead_data = session.lead_data or {}
+                    session.lead_data["defer_kids_request"] = True
+                    flag_modified(session, "lead_data")
+                    db.commit()
+                    defer_kids_request = True
 
-            if lead_data and lead_data.get("event_date") and (force_kids or not lead_data.get("kids_count")):
+            if lead_data and lead_data.get("event_date") and (force_kids or not lead_data.get("kids_count")) and not defer_kids_request:
                 date_obj = parse_user_date(lead_data["event_date"]) or parse_user_date(request.message)
                 if date_obj:
                     response = build_birthday_date_question(date_obj)
@@ -491,6 +544,7 @@ async def chat(request: ChatRequest):
                     db.commit()
 
             # Если пользователь выбрал формат — фиксируем без LLM
+            format_candidate = None
             if lead_data and lead_data.get("event_date") and lead_data.get("kids_count"):
                 format_candidate = extract_format_from_message(request.message)
                 if format_candidate and current_lead and not lead_data.get("format"):
@@ -574,21 +628,23 @@ async def chat(request: ChatRequest):
                 is_room = "комнат" in format_value or "room" in format_value
                 
                 if not format_value:
-                    response = build_format_choice_message(lead_data.get("event_date"), lead_data.get("kids_count")) \
-                        or "🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
-                    bot_message = Message(session_id=session.id, role="assistant", content=response)
-                    db.add(bot_message)
+                    session.lead_data = session.lead_data or {}
+                    session.lead_data["defer_format_request"] = True
+                    flag_modified(session, "lead_data")
                     db.commit()
-                    db.close()
-                    return ChatResponse(reply=response, session_id=session_id)
                 
                 if is_room and not lead_data.get("time"):
-                    response = "⏰ На какое время? Слоты: 10:30, 14:30, 18:30"
-                    bot_message = Message(session_id=session.id, role="assistant", content=response)
-                    db.add(bot_message)
+                    if format_candidate:
+                        response = "⏰ На какое время? Слоты: 10:30, 14:30, 18:30"
+                        bot_message = Message(session_id=session.id, role="assistant", content=response)
+                        db.add(bot_message)
+                        db.commit()
+                        db.close()
+                        return ChatResponse(reply=response, session_id=session_id)
+                    session.lead_data = session.lead_data or {}
+                    session.lead_data["defer_time_request"] = True
+                    flag_modified(session, "lead_data")
                     db.commit()
-                    db.close()
-                    return ChatResponse(reply=response, session_id=session_id)
                 
                 if not lead_data.get("customer_name"):
                     response = "👤 Как к вам обращаться?"
@@ -638,9 +694,9 @@ async def chat(request: ChatRequest):
                 if deal_id:
                     # Добавляем историю чата как примечание
                     try:
-                        amocrm_client = AmoCRMClient()
+                        amocrm_instance = AmoCRMClient()
                         note_text = f"📱 История переписки перед запросом менеджера:\\n\\n{chat_history_text}"
-                        await amocrm_client.add_note(int(deal_id), note_text)
+                        await amocrm_instance.add_note(int(deal_id), note_text)
                     except Exception as ne:
                         logger.error(f"Failed to add chat history note: {ne}")
                     logger.info(f"Manager request sent to AmoCRM, deal_id={deal_id}")
@@ -679,6 +735,54 @@ async def chat(request: ChatRequest):
                 if defer_phone and lead_data and not lead_data.get("phone"):
                     if "телефон" not in response.lower() and "номер" not in response.lower():
                         response += "\n\n📱 Оставьте номер телефона для связи, чтобы мы закрепили бронирование."
+
+                defer_phone_confirm = None
+                if session.lead_data and session.lead_data.get("defer_phone_confirm"):
+                    defer_phone_confirm = True
+                    session.lead_data.pop("defer_phone_confirm", None)
+                    flag_modified(session, "lead_data")
+                    db.commit()
+                if defer_phone_confirm and lead_data and lead_data.get("phone"):
+                    phone_confirmed = phone_confirmed_override or bool(session.lead_data.get("phone_confirmed"))
+                    if not phone_confirmed:
+                        response += f"\n\n📱 Актуален ли этот номер телефона для связи?\n{lead_data.get('phone')}\n\nОтветьте: да/нет."
+
+                defer_format = None
+                if session.lead_data and session.lead_data.get("defer_format_request"):
+                    defer_format = True
+                    session.lead_data.pop("defer_format_request", None)
+                    flag_modified(session, "lead_data")
+                    db.commit()
+                if defer_format and lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("format"):
+                    format_msg = build_format_choice_message(lead_data.get("event_date"), lead_data.get("kids_count"))
+                    if format_msg and format_msg.lower() not in response.lower():
+                        response += "\n\n" + format_msg
+
+                defer_kids = None
+                if session.lead_data and session.lead_data.get("defer_kids_request"):
+                    defer_kids = True
+                    session.lead_data.pop("defer_kids_request", None)
+                    flag_modified(session, "lead_data")
+                    db.commit()
+                if defer_kids and lead_data and lead_data.get("event_date") and not lead_data.get("kids_count"):
+                    date_obj = parse_user_date(lead_data["event_date"])
+                    if date_obj:
+                        kids_msg = build_birthday_date_question(date_obj)
+                        if kids_msg and kids_msg.lower() not in response.lower():
+                            response += "\n\n" + kids_msg
+
+                defer_time = None
+                if session.lead_data and session.lead_data.get("defer_time_request"):
+                    defer_time = True
+                    session.lead_data.pop("defer_time_request", None)
+                    flag_modified(session, "lead_data")
+                    db.commit()
+                if defer_time and lead_data and lead_data.get("event_date") and lead_data.get("kids_count") and lead_data.get("format"):
+                    format_value = (lead_data.get("format") or "").strip().lower()
+                    is_room = "комнат" in format_value or "room" in format_value
+                    if is_room and not lead_data.get("time"):
+                        if "слот" not in response.lower() and "время" not in response.lower():
+                            response += "\n\n⏰ На какое время? Слоты: 10:30, 14:30, 18:30"
         
         # Сохраняем ответ бота
         bot_message = Message(
@@ -721,9 +825,9 @@ async def chat(request: ChatRequest):
                         save_amocrm_deal_id(current_lead.id, str(deal_id))
                         # Добавляем историю чата как примечание
                         try:
-                            amocrm_client = AmoCRMClient()
+                            amocrm_instance = AmoCRMClient()
                             note_text = f"📱 История переписки (веб-чат):\\n\\n{chat_history_text}"
-                            await amocrm_client.add_note(int(deal_id), note_text)
+                            await amocrm_instance.add_note(int(deal_id), note_text)
                         except Exception as ne:
                             logger.error(f"Failed to add chat history note: {ne}")
                         logger.info(f"Web lead #{current_lead.id} sent to AmoCRM, deal_id={deal_id}")

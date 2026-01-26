@@ -2314,19 +2314,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             lead_data = lead_to_dict(current_lead)
 
-            # Если в сообщении есть дата — фиксируем и сразу спрашиваем про детей
-            parsed_date = parse_user_date(message_text)
-            if parsed_date:
-                normalized_date = format_date_ru(parsed_date, include_year=False)
-                current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
-                lead_data = lead_to_dict(current_lead)
-                context.user_data["force_kids"] = True
-                response_text = build_birthday_date_question(parsed_date)
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=response_text
-                )
-                return
+            # Если в сообщении есть дата И это НЕ вопрос И дата ещё не сохранена — фиксируем
+            # Защита: не парсим дату из вопросов типа "Это точно понедельник?"
+            is_question = '?' in message_text
+            already_has_date = bool(lead_data.get("event_date"))
+            
+            if not is_question and not already_has_date:
+                parsed_date = parse_user_date(message_text)
+                if parsed_date:
+                    normalized_date = format_date_ru(parsed_date, include_year=False)
+                    current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
+                    lead_data = lead_to_dict(current_lead)
+                    context.user_data["force_kids"] = True
+                    response_text = build_birthday_date_question(parsed_date)
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=response_text
+                    )
+                    return
 
             # Если дата есть, но детей ещё нет (или мы форсим сбор) — пытаемся распарсить число
             force_kids = context.user_data.get("force_kids")
@@ -2337,16 +2342,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     lead_data = lead_to_dict(current_lead)
                     context.user_data.pop("force_kids", None)
 
-            # Если дата есть, но детей всё ещё нет (или мы форсим сбор) — задаём следующий вопрос с ценой
-            if lead_data.get("event_date") and (force_kids or not lead_data.get("kids_count")):
-                date_obj = parse_user_date(lead_data["event_date"]) or parse_user_date(message_text)
-                if date_obj:
-                    response_text = build_birthday_date_question(date_obj)
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text=response_text
-                    )
-                    return
+            # Если дата есть, но детей всё ещё нет — НЕ повторяем шаблонный вопрос!
+            # Пусть AI-агент обработает сообщение (например, ответит на вопрос "В смысле?")
+            # Примечание: шаблонный вопрос о детях уже был задан при получении даты (строки 2317-2329)
+            # Повторять его не нужно — это создаёт ощущение "линейного бота"
 
             # Если ждём телефон и пользователь прислал его — сохраняем без LLM
             if lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
@@ -2380,16 +2379,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return  # Ждём выбора
             
-            # Если дата и дети уже есть, но телефона нет — спрашиваем телефон
-            if lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone") and not pending_phone:
-                if should_defer_phone_request(message_text):
-                    context.user_data["defer_phone_request"] = True
-                else:
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text="📱 Оставьте номер телефона для связи:"
-                    )
-                    return
+            # Если дата и дети уже есть, но телефона нет — AI-агент сам спросит телефон
+            # Убрали жёсткий шаблонный запрос — это делало бота "линейным"
+            # AI-агент знает из контекста что нужен телефон и мягко попросит его
             
             # РАННЯЯ ОТПРАВКА В CRM: Как только есть телефон — создаём сделку
             
@@ -2453,33 +2445,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Формируем lead_data для передачи в agent (добавляем first_name для имени из профиля)
             lead_data["first_name"] = user.first_name
 
-            # Если есть дата + дети + телефон — ведём короткими вопросами
-            if lead_data.get("event_date") and lead_data.get("kids_count") and lead_data.get("phone"):
-                format_value = (lead_data.get("format") or "").strip().lower()
-                is_room = "комнат" in format_value or "room" in format_value
-                is_restaurant = "ресторан" in format_value or "restaurant" in format_value
-
-                if not format_value:
-                    format_msg = build_format_choice_message(lead_data.get("event_date"), lead_data.get("kids_count"))
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text=format_msg or "🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?"
-                    )
-                    return
-
-                if is_room and not lead_data.get("time"):
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text="⏰ На какое время? Слоты: 10:30, 14:30, 18:30"
-                    )
-                    return
-
-                if not lead_data.get("customer_name"):
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text="👤 Как к вам обращаться?"
-                    )
-                    return
+            # Убрали жёсткие шаблонные вопросы для формата, времени и имени
+            # AI-агент сам задаст эти вопросы в контексте естественного диалога
+            # Это позволяет отвечать на уточняющие вопросы клиента
         
         # Проверяем статус сделки в AmoCRM
         deal_in_work = False

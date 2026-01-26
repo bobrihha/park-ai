@@ -1153,18 +1153,23 @@ def create_vk_bot(token: str, group_id: int):
                 # РАННЯЯ ОТПРАВКА В CRM: Как только есть телефон — создаём сделку
                 lead_data = lead_to_dict(current_lead)
 
-                # Если в сообщении есть дата — фиксируем и сразу спрашиваем про детей
-                parsed_date = parse_user_date(message_text)
-                if parsed_date:
-                    normalized_date = format_date_ru(parsed_date, include_year=False)
-                    current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
-                    lead_data = lead_to_dict(current_lead)
-                    session.lead_data = session.lead_data or {}
-                    session.lead_data["force_kids"] = True
-                    flag_modified(session, "lead_data")
-                    db.commit()
-                    await message.answer(build_birthday_date_question(parsed_date))
-                    return
+                # Если в сообщении есть дата И это НЕ вопрос И дата ещё не сохранена — фиксируем
+                # Защита: не парсим дату из вопросов типа "Это точно понедельник?"
+                is_question = '?' in message_text
+                already_has_date = bool(lead_data.get("event_date"))
+                
+                if not is_question and not already_has_date:
+                    parsed_date = parse_user_date(message_text)
+                    if parsed_date:
+                        normalized_date = format_date_ru(parsed_date, include_year=False)
+                        current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
+                        lead_data = lead_to_dict(current_lead)
+                        session.lead_data = session.lead_data or {}
+                        session.lead_data["force_kids"] = True
+                        flag_modified(session, "lead_data")
+                        db.commit()
+                        await message.answer(build_birthday_date_question(parsed_date))
+                        return
 
                 # Если дата есть, но детей ещё нет (или мы форсим сбор) — пытаемся распарсить число
                 force_kids = session.lead_data.get("force_kids") if session.lead_data else None
@@ -1178,12 +1183,8 @@ def create_vk_bot(token: str, group_id: int):
                             flag_modified(session, "lead_data")
                             db.commit()
 
-                # Если дата есть, но детей всё ещё нет (или мы форсим сбор) — задаём следующий вопрос с ценой
-                if lead_data.get("event_date") and (force_kids or not lead_data.get("kids_count")):
-                    date_obj = parse_user_date(lead_data["event_date"]) or parse_user_date(message_text)
-                    if date_obj:
-                        await message.answer(build_birthday_date_question(date_obj))
-                        return
+                # Если дата есть, но детей всё ещё нет — НЕ повторяем шаблонный вопрос!
+                # Пусть AI-агент обработает сообщение (например, ответит на вопрос "В смысле?")
 
                 # Если ждём телефон и пользователь прислал его — сохраняем без LLM
                 if lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
@@ -1222,16 +1223,8 @@ def create_vk_bot(token: str, group_id: int):
                     )
                     return
 
-                # Если дата и дети уже есть, но телефона нет — спрашиваем телефон
-                if lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
-                    if should_defer_phone_request(message_text):
-                        session.lead_data = session.lead_data or {}
-                        session.lead_data["defer_phone_request"] = True
-                        flag_modified(session, "lead_data")
-                        db.commit()
-                    else:
-                        await message.answer("📱 Оставьте номер телефона для связи:")
-                        return
+                # Если дата и дети уже есть, но телефона нет — AI-агент сам спросит телефон
+                # Убрали жёсткий шаблонный запрос — это делало бота "линейным"
                 
                 # Проверяем валидность телефона (минимум 10 цифр)
                 phone = lead_data.get("phone", "")
@@ -1297,23 +1290,9 @@ def create_vk_bot(token: str, group_id: int):
                 # Формируем lead_data для передачи в agent (добавляем first_name для имени из профиля)
                 lead_data["first_name"] = vk_fname
 
-                # Если есть дата + дети + телефон — ведём короткими вопросами
-                if lead_data.get("event_date") and lead_data.get("kids_count") and lead_data.get("phone"):
-                    format_value = (lead_data.get("format") or "").strip().lower()
-                    is_room = "комнат" in format_value or "room" in format_value
-
-                    if not format_value:
-                        format_msg = build_format_choice_message(lead_data.get("event_date"), lead_data.get("kids_count"))
-                        await message.answer(format_msg or "🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?")
-                        return
-
-                    if is_room and not lead_data.get("time"):
-                        await message.answer("⏰ На какое время? Слоты: 10:30, 14:30, 18:30")
-                        return
-
-                    if not lead_data.get("customer_name"):
-                        await message.answer("👤 Как к вам обращаться?")
-                        return
+                # Убрали жёсткие шаблонные вопросы для формата, времени и имени
+                # AI-агент сам задаст эти вопросы в контексте естественного диалога
+                # Это позволяет отвечать на уточняющие вопросы клиента ("Есть ли у вас батут?")
             
             # Проверяем статус сделки в AmoCRM
             deal_in_work = False
