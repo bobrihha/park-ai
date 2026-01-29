@@ -446,11 +446,19 @@ class AmoCRMClient:
         if not deal_ids:
             return []
         
-        # Fetch deal details
+        # Fetch deal details, filter by pipeline_id
         deals = []
         for deal_id in deal_ids[:5]:  # Limit to 5 recent deals
             deal = await self.get_deal_details(deal_id)
             if deal:
+                # Фильтруем: только сделки из нашей воронки (дни рождения)
+                if self.pipeline_id:
+                    deal_pipeline = deal.get("pipeline_id")
+                    if deal_pipeline and str(deal_pipeline) != str(self.pipeline_id):
+                        continue  # Пропускаем сделки из других воронок
+                # Фильтруем: только сделки с датой события
+                if not deal.get("event_date"):
+                    continue  # Пропускаем сделки без даты
                 deals.append(deal)
         
         return deals
@@ -474,6 +482,7 @@ class AmoCRMClient:
             "name": result.get("name"),
             "price": result.get("price"),
             "status_id": result.get("status_id"),
+            "pipeline_id": result.get("pipeline_id"),
             "created_at": result.get("created_at"),
         }
         

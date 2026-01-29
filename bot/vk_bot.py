@@ -69,7 +69,8 @@ from core.lead_service import (
     mark_lead_sent_to_manager,
     lead_to_dict,
     save_amocrm_deal_id,
-    mark_status_notified
+    mark_status_notified,
+    cleanup_orphan_leads
 )
 from core.utils import get_afisha_events
 from core.amocrm import send_lead_to_amocrm, amocrm_client
@@ -207,8 +208,9 @@ def create_vk_bot(token: str, group_id: int):
             leads = db.query(Lead).filter(
                 Lead.telegram_id == f"vk_{user_id}",
                 Lead.status.in_(["new", "contacted", "booked"]),
-                Lead.sent_to_manager == True
-            ).order_by(Lead.created_at.desc()).limit(3).all()
+                Lead.sent_to_manager == True,
+                Lead.amocrm_deal_id != None  # Только лиды с CRM
+            ).order_by(Lead.created_at.desc()).limit(1).all()
             
             if not leads:
                 await message.answer(

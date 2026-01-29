@@ -507,10 +507,7 @@ def get_active_lead_info(user_id: int, park_id: str = "nn") -> Optional[dict]:
             Lead.telegram_id == str(user_id),
             Lead.park_id == park_id,
             Lead.status.in_(["new", "contacted"]),
-            or_(
-                Lead.sent_to_manager == False,
-                Lead.amocrm_deal_id != None
-            )
+            Lead.amocrm_deal_id != None  # Только лиды с CRM
         ).order_by(Lead.id.desc()).first()
         
         if lead and lead.event_date:
@@ -609,5 +606,35 @@ def get_lead_by_id(lead_id: int) -> Optional[Lead]:
     db = SessionLocal()
     try:
         return db.query(Lead).filter(Lead.id == lead_id).first()
+    finally:
+        db.close()
+
+
+def cleanup_orphan_leads(telegram_id: str) -> int:
+    """
+    Закрыть все лиды пользователя без amocrm_deal_id.
+    Вызывается при проверке бронирований — если в AmoCRM ничего нет,
+    очищаем локальную БД.
+    
+    Returns:
+        Количество закрытых лидов
+    """
+    db = SessionLocal()
+    try:
+        orphan_leads = db.query(Lead).filter(
+            Lead.telegram_id == str(telegram_id),
+            Lead.amocrm_deal_id == None,
+            Lead.status.in_(['new', 'contacted', 'booked'])
+        ).all()
+        
+        count = len(orphan_leads)
+        for lead in orphan_leads:
+            lead.status = 'cancelled'
+            logger.info(f'Cleanup: Lead #{lead.id} marked as cancelled (no AmoCRM deal)')
+        
+        if count > 0:
+            db.commit()
+            
+        return count
     finally:
         db.close()
