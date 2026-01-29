@@ -1,7 +1,6 @@
 """Модуль уведомлений менеджеров."""
 import os
 import re
-import aiohttp
 import logging
 from datetime import datetime
 
@@ -11,6 +10,8 @@ logger = logging.getLogger(__name__)
 
 async def send_to_managers(text: str):
     """Отправить сообщение в чат менеджеров."""
+    import httpx
+    
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("MANAGER_CHAT_ID")
     
@@ -21,55 +22,61 @@ async def send_to_managers(text: str):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     
     try:
-        async with aiohttp.ClientSession() as session:
+        async with httpx.AsyncClient() as client:
             payload = {
                 "chat_id": chat_id,
                 "text": text,
                 "parse_mode": "HTML"
             }
-            async with session.post(url, json=payload) as response:
-                if response.status != 200:
-                    resp_text = await response.text()
-                    logger.error(f"Failed to send manager notification: {resp_text}")
-                else:
-                    logger.info("Manager notification sent successfully")
+            response = await client.post(url, json=payload)
+            if response.status_code != 200:
+                logger.error(f"Failed to send manager notification: {response.text}")
+            else:
+                logger.info("Manager notification sent successfully")
     except Exception as e:
         logger.error(f"Error sending notification: {e}")
 
 
 async def send_to_birthday_channel(text: str):
     """Отправить заявку на день рождения в отдельный канал."""
+    import httpx
+    
     token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("BIRTHDAY_CHAT_ID")
+    chat_id = os.getenv("BIRTHDAY_CHANNEL_ID")
     
     if not token or not chat_id:
-        logger.warning("Birthday notification failed: TELEGRAM_BOT_TOKEN or BIRTHDAY_CHAT_ID not set")
-        # Fallback: если BIRTHDAY_CHAT_ID не задан, отправляем в общий канал
+        logger.warning("Birthday notification failed: TELEGRAM_BOT_TOKEN or BIRTHDAY_CHANNEL_ID not set")
+        # Fallback: если BIRTHDAY_CHANNEL_ID не задан, отправляем в общий канал
         await send_to_managers(text)
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     
     try:
-        async with aiohttp.ClientSession() as session:
+        async with httpx.AsyncClient() as client:
             payload = {
                 "chat_id": chat_id,
                 "text": text,
                 "parse_mode": "HTML"
             }
-            async with session.post(url, json=payload) as response:
-                if response.status != 200:
-                    resp_text = await response.text()
-                    logger.error(f"Failed to send birthday notification: {resp_text}")
-                else:
-                    logger.info("Birthday notification sent to dedicated channel")
+            response = await client.post(url, json=payload)
+            if response.status_code != 200:
+                logger.error(f"Failed to send birthday notification: {response.text}")
+            else:
+                logger.info("Birthday notification sent to dedicated channel")
     except Exception as e:
         logger.error(f"Error sending birthday notification: {e}")
 
 def format_lead_message(platform: str, user_id: str, lead_data: dict, username: str = None) -> str:
     """Форматирование заявки для менеджеров."""
     
-    source = "ВКонтакте" if platform == "vk" else "Telegram"
+    # Определяем источник правильно
+    if platform == "vk":
+        source = "ВКонтакте"
+    elif platform == "web":
+        source = "Веб-чат"
+    else:
+        source = "Telegram"
     
     # Формируем ссылку на профиль
     if platform == "vk":

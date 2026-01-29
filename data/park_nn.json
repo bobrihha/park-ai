@@ -1,0 +1,52 @@
+{
+    "park_id": "nn",
+    "park": {
+        "name": "Джунгли Сити",
+        "city": "Нижний Новгород",
+        "address": "ул. Коминтерна, 11, ТЦ «Лента», 1 этаж",
+        "metro": "Буревестник — 250 м"
+    },
+    "phones": {
+        "main": "+7 (831) 213-50-50",
+        "whatsapp": "+7 (962) 509-74-93"
+    },
+    "schedule": {
+        "monday": {
+            "open": "12:00",
+            "close": "22:00"
+        },
+        "weekdays": {
+            "open": "10:00",
+            "close": "22:00"
+        },
+        "weekends": {
+            "open": "10:00",
+            "close": "22:00"
+        },
+        "entrance_until": "21:00",
+        "restaurant_until": "21:00",
+        "birthday_dept_until": "21:00"
+    },
+    "prices": {
+        "monday": 990,
+        "weekday": 1190,
+        "weekend": 1590,
+        "adults_free": true,
+        "under_1_free": true
+    },
+    "links": {
+        "site": "https://nn.jucity.ru/",
+        "afisha": "https://nn.jucity.ru/afisha/",
+        "rules": "https://nn.jucity.ru/rules/",
+        "menu": "https://catalog.botcicada.ru/menu.html",
+        "specmenu": "https://catalog.botcicada.ru/specmenu.html",
+        "cakes": "https://catalog.botcicada.ru/cakes.html",
+        "animators": "https://catalog.botcicada.ru/animators.html",
+        "telegram": "https://t.me/juicitynn",
+        "instagram": "@juicitynn"
+    },
+    "amocrm": {
+        "pipeline_id": null,
+        "responsible_user_id": null
+    }
+}

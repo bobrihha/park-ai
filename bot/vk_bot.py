@@ -7,6 +7,10 @@ from vkbottle.bot import Bot, Message
 from vkbottle import Keyboard, KeyboardButtonColor, Text, PhotoMessageUploader
 import re
 import aiohttp
+import time
+
+# Таймаут отключения бота после ответа оператора (30 минут)
+OPERATOR_TIMEOUT_SECONDS = 1800
 
 from core.agent import Agent
 from core.rag import RAGSystem
@@ -93,6 +97,47 @@ def create_vk_bot(token: str, group_id: int):
         except Exception as e:
             logger.error(f"Failed to upload photo from {file_path}: {e}")
         return None
+    
+    def is_operator_active(session) -> bool:
+        """
+        Проверяет, активен ли оператор для данной сессии.
+        Если с момента подключения оператора прошло больше OPERATOR_TIMEOUT_SECONDS,
+        автоматически снимает флаг и возвращает False.
+        """
+        if not session or not session.lead_data:
+            return False
+        
+        if not session.lead_data.get("operator_active"):
+            return False
+        
+        # Проверяем таймаут
+        operator_since = session.lead_data.get("operator_active_since", 0)
+        elapsed = time.time() - operator_since
+        
+        if elapsed > OPERATOR_TIMEOUT_SECONDS:
+            # Таймаут истёк — снимаем флаг
+            session.lead_data["operator_active"] = False
+            session.lead_data.pop("operator_active_since", None)
+            logger.info(f"Operator timeout expired for session {session.id}, bot is back online")
+            return False
+        
+        return True
+    
+    def set_operator_active(session, db, active: bool = True):
+        """Устанавливает флаг активности оператора."""
+        if not session.lead_data:
+            session.lead_data = {}
+        
+        session.lead_data["operator_active"] = active
+        if active:
+            session.lead_data["operator_active_since"] = time.time()
+            logger.info(f"Operator connected for session {session.id}, bot paused for {OPERATOR_TIMEOUT_SECONDS}s")
+        else:
+            session.lead_data.pop("operator_active_since", None)
+            logger.info(f"Operator disconnected for session {session.id}, bot resumed")
+        
+        flag_modified(session, "lead_data")
+        db.commit()
     
     # Клавиатура для старта
     start_keyboard = (
@@ -412,9 +457,18 @@ def create_vk_bot(token: str, group_id: int):
                 except Exception as e:
                     logger.error(f"Failed to send VK lead after phone confirm: {e}")
 
-                # Переходим к следующему шагу
+                # Переходим к следующему шагу — выбор формата с кнопками
                 format_msg = build_format_choice_message(lead_dict.get("event_date"), lead_dict.get("kids_count"))
-                await message.answer(format_msg or "🎉 Какой формат праздника предпочитаете — тематическая комната или столик в ресторане?")
+                format_keyboard = (
+                    Keyboard(inline=True)
+                    .add(Text("🏠 Комната", payload={"cmd": "format_room"}), color=KeyboardButtonColor.PRIMARY)
+                    .row()
+                    .add(Text("🍰 Ресторан", payload={"cmd": "format_zone"}), color=KeyboardButtonColor.POSITIVE)
+                )
+                await message.answer(
+                    format_msg or "🎉 Какой формат праздника предпочитаете?",
+                    keyboard=format_keyboard
+                )
                 
             elif cmd == "confirm_phone_no":
                 # Не подтвердил -> просим указать другой номер
@@ -428,7 +482,200 @@ def create_vk_bot(token: str, group_id: int):
                 
                 await message.answer("📱 Укажите, пожалуйста, ваш номер телефона для связи:")
 
+            # ============ ОБРАБОТКА ВЫБОРА ФОРМАТА ============
+            elif cmd == "format_room":
+                lead = get_or_create_lead(f"vk_{user_id}", source="vk", park_id="nn")
+                update_lead_from_data(lead.id, {"format": "комната"})
+                
+                # Показываем слоты времени
+                time_keyboard = (
+                    Keyboard(inline=True)
+                    .add(Text("🕙 10:30", payload={"cmd": "time_1030"}), color=KeyboardButtonColor.PRIMARY)
+                    .row()
+                    .add(Text("🕝 14:30", payload={"cmd": "time_1430"}), color=KeyboardButtonColor.PRIMARY)
+                    .row()
+                    .add(Text("🕡 18:30", payload={"cmd": "time_1830"}), color=KeyboardButtonColor.PRIMARY)
+                ).get_json()
+                await message.answer(
+                    "🏠 Отлично, выбрали тематическую комнату!\n\n⏰ Какой слот времени удобен?",
+                    keyboard=time_keyboard
+                )
+
+            elif cmd == "format_zone":
+                lead = get_or_create_lead(f"vk_{user_id}", source="vk", park_id="nn")
+                update_lead_from_data(lead.id, {"format": "ресторан"})
+                mark_lead_sent_to_manager(lead.id)
+                
+                # Отправляем в AmoCRM
+                try:
+                    lead_data_dict = lead_to_dict(lead)
+                    lead_data_dict["source"] = "vk"
+                    result = await send_lead_to_amocrm(lead_data_dict, vk_id=user_id)
+                    if result and result[0]:
+                        save_amocrm_deal_id(lead.id, str(result[0]))
+                except Exception as e:
+                    logger.error(f"AmoCRM error: {e}")
+                
+                # Уведомляем менеджеров
+                try:
+                    msg_text = format_lead_message("vk", str(user_id), lead_to_dict(lead))
+                    await send_to_birthday_channel(msg_text)
+                except Exception as e:
+                    logger.error(f"Notify error: {e}")
+                
+                # Показываем кнопки допуслуг
+                extras_keyboard = (
+                    Keyboard(inline=True)
+                    .add(Text("🎂 Посмотреть торты", payload={"cmd": "view_cakes"}), color=KeyboardButtonColor.PRIMARY)
+                    .row()
+                    .add(Text("🎭 Аниматоры и шоу", payload={"cmd": "view_animators"}), color=KeyboardButtonColor.PRIMARY)
+                    .row()
+                    .add(Text("🎁 Пакеты под ключ", payload={"cmd": "view_packages"}), color=KeyboardButtonColor.PRIMARY)
+                ).get_json()
+                await message.answer(
+                    "🍰 Записал столик в ресторане!\n\n"
+                    "Менеджер из отдела праздников скоро свяжется с вами 🧚\n\n"
+                    "А пока вы ждёте — у нас есть своя кондитерская! 🎂\n"
+                    "Можете выбрать торт к празднику или посмотреть другие услуги:",
+                    keyboard=extras_keyboard
+                )
+
+
+            # ============ ОБРАБОТКА СЛОТОВ ВРЕМЕНИ ============
+            elif cmd in ("time_1030", "time_1430", "time_1830"):
+                time_map = {"time_1030": "10:30", "time_1430": "14:30", "time_1830": "18:30"}
+                chosen_time = time_map[cmd]
+                
+                lead = get_or_create_lead(f"vk_{user_id}", source="vk", park_id="nn")
+                update_lead_from_data(lead.id, {"time": chosen_time})
+                mark_lead_sent_to_manager(lead.id)
+                
+                # Отправляем в AmoCRM
+                try:
+                    lead_data_dict = lead_to_dict(lead)
+                    lead_data_dict["source"] = "vk"
+                    result = await send_lead_to_amocrm(lead_data_dict, vk_id=user_id)
+                    if result and result[0]:
+                        save_amocrm_deal_id(lead.id, str(result[0]))
+                except Exception as e:
+                    logger.error(f"AmoCRM error: {e}")
+                
+                # Уведомляем менеджеров
+                try:
+                    msg_text = format_lead_message("vk", str(user_id), lead_to_dict(lead))
+                    await send_to_birthday_channel(msg_text)
+                except Exception as e:
+                    logger.error(f"Notify error: {e}")
+                
+                # Показываем кнопки допуслуг
+                extras_keyboard = (
+                    Keyboard(inline=True)
+                    .add(Text("🎂 Посмотреть торты", payload={"cmd": "view_cakes"}), color=KeyboardButtonColor.PRIMARY)
+                    .row()
+                    .add(Text("🎭 Аниматоры и шоу", payload={"cmd": "view_animators"}), color=KeyboardButtonColor.PRIMARY)
+                    .row()
+                    .add(Text("🎁 Пакеты под ключ", payload={"cmd": "view_packages"}), color=KeyboardButtonColor.PRIMARY)
+                ).get_json()
+                await message.answer(
+                    f"⏰ Записал на {chosen_time}!\n\n"
+                    f"Менеджер из отдела праздников скоро свяжется с вами 🧚\n\n"
+                    f"А пока вы ждёте — у нас есть своя кондитерская! 🎂\n"
+                    f"Можете выбрать торт к празднику или посмотреть другие услуги:",
+                    keyboard=extras_keyboard
+                )
+
+
+            # ============ ПОДТВЕРЖДЕНИЕ ИМЕНИ ============
+            elif cmd == "name_confirm_yes":
+                name = payload.get("name", "Гость")
+                
+                lead = get_or_create_lead(f"vk_{user_id}", source="vk", park_id="nn")
+                update_lead_from_data(lead.id, {"customer_name": name})
+                mark_lead_sent_to_manager(lead.id)
+                
+                lead_data = lead_to_dict(lead)
+                
+                # Синхронизируем с AmoCRM
+                if lead.amocrm_deal_id:
+                    try:
+                        await amocrm_client.update_deal_fields(int(lead.amocrm_deal_id), lead_data)
+                    except Exception as e:
+                        logger.error(f"Failed to sync AmoCRM: {e}")
+                
+                # Уведомляем менеджера
+                try:
+                    msg_text = format_lead_message("vk", str(user_id), lead_data)
+                    await send_to_birthday_channel(msg_text)
+                except Exception as e:
+                    logger.error(f"Failed to notify managers: {e}")
+                
+                # Показываем итог + допуслуги
+                extras_keyboard = (
+                    Keyboard(inline=True)
+                    .add(Text("🎂 Каталог тортов", payload={"cmd": "view_cakes"}), color=KeyboardButtonColor.PRIMARY)
+                    .row()
+                    .add(Text("🎭 Аниматоры", payload={"cmd": "view_animators"}), color=KeyboardButtonColor.PRIMARY)
+                ).get_json()
+                await message.answer(
+                    f"✅ Заявка принята! Менеджер скоро свяжется.\n\n"
+                    f"📋 Ваша бронь:\n"
+                    f"- Дата: {lead_data.get('event_date', '—')}\n"
+                    f"- Детей: {lead_data.get('kids_count', '—')}\n"
+                    f"- Формат: {lead_data.get('format', '—')}\n"
+                    f"- Время: {lead_data.get('time', '—')}\n"
+                    f"- Имя: {name}\n\n"
+                    f"💡 Пока ждёте звонка:",
+                    keyboard=extras_keyboard
+                )
+
+            elif cmd == "name_confirm_no":
+                session = get_or_create_session(db, user_id, "vk")
+                session.lead_data = session.lead_data or {}
+                session.lead_data["waiting_name"] = True
+                flag_modified(session, "lead_data")
+                db.commit()
+                await message.answer("✏️ Напишите, пожалуйста, ваше имя:")
+
+            # ============ ПРОСМОТР КАТАЛОГОВ ============
+            elif cmd == "view_cakes":
+                await message.answer(
+                    "🎂 Наша кондитерская!\n\n"
+                    "У нас есть торты на любой вкус — от классических до тематических с персонажами!\n\n"
+                    "📱 Посмотреть каталог: https://catalog.botcicada.ru/menu.html\n\n"
+                    "Также можно принести свой торт (сбор 1000₽ за вынос торта).\n\n"
+                    "Если нужна помощь с выбором — пишите, подскажу! 😊"
+                )
+
+            elif cmd == "view_animators":
+                await message.answer(
+                    "🎭 Аниматоры и шоу!\n\n"
+                    "У нас есть:\n"
+                    "• Тематические программы с персонажами\n"
+                    "• Квесты и приключения\n"
+                    "• Научные шоу\n"
+                    "• Мастер-классы\n"
+                    "• Аквагрим\n\n"
+                    "📱 Каталог программ: https://catalog.botcicada.ru/animation.html\n\n"
+                    "Менеджер поможет подобрать идеальную программу под возраст и интересы! 🎉"
+                )
+
+            elif cmd == "view_packages":
+                await message.answer(
+                    "🎁 Пакеты праздников!\n\n"
+                    "🌴 «Джунгли зовут» (5 детей) — от 9 660₽\n"
+                    "Билеты + поздравление от Джуси + угощения\n\n"
+                    "🦁 «Большое сафари» (7 детей) — от 16 050₽\n"
+                    "Билеты + анимация 60 мин + угощения\n\n"
+                    "🌴 «Тропический переполох» (10 детей) — от 25 850₽\n"
+                    "Билеты + анимация + мини-шоу + шары + угощения\n\n"
+                    "📱 Подробнее: https://catalog.botcicada.ru/packages.html\n\n"
+                    "Расскажите что хотите — и я помогу выбрать! 😊"
+                )
+            # ============ КОНЕЦ ОБРАБОТКИ BIRTHDAY FLOW ============
+
+
             elif cmd.startswith("change_"):
+
                 # cmd формат: change_{lead_id}_{action}
                 parts = cmd.split("_")
                 
@@ -517,6 +764,75 @@ def create_vk_bot(token: str, group_id: int):
                 db.commit()
                 
                 await message.answer("📱 Укажите номер телефона для связи:")
+            
+            elif cmd == "format_room":
+                # Выбрали тематическую комнату
+                session = get_or_create_session(db, user_id, "vk")
+                session.lead_data = session.lead_data or {}
+                session.lead_data["format"] = "Тематическая комната"
+                flag_modified(session, "lead_data")
+                db.commit()
+                
+                # Обновляем лид
+                lead = get_or_create_lead(f"vk_{user_id}", source="vk", park_id="nn")
+                update_lead_from_data(lead.id, {"format": "Тематическая комната"})
+                
+                # Предлагаем выбор времени
+                time_keyboard = (
+                    Keyboard(inline=True)
+                    .add(Text("🕥 10:30", payload={"cmd": "time_10_30"}), color=KeyboardButtonColor.PRIMARY)
+                    .row()
+                    .add(Text("🕝 14:30", payload={"cmd": "time_14_30"}), color=KeyboardButtonColor.PRIMARY)
+                    .row()
+                    .add(Text("🕡 18:30", payload={"cmd": "time_18_30"}), color=KeyboardButtonColor.PRIMARY)
+                )
+                await message.answer(
+                    "🏠 Отлично, тематическая комната!\n\nВыберите удобное время начала:",
+                    keyboard=time_keyboard
+                )
+            
+            elif cmd == "format_zone":
+                # Выбрали ресторан
+                session = get_or_create_session(db, user_id, "vk")
+                session.lead_data = session.lead_data or {}
+                session.lead_data["format"] = "Ресторан"
+                flag_modified(session, "lead_data")
+                db.commit()
+                
+                # Обновляем лид
+                lead = get_or_create_lead(f"vk_{user_id}", source="vk", park_id="nn")
+                update_lead_from_data(lead.id, {"format": "Ресторан"})
+                
+                # Ресторан — без ограничений по времени, спрашиваем имя
+                await message.answer(
+                    "🍰 Отлично, столик в ресторане!\n\n"
+                    "Напомните, пожалуйста, как вас зовут? (Имя для записи)"
+                )
+            
+            elif cmd in ("time_10_30", "time_14_30", "time_18_30"):
+                # Выбрали время
+                time_map = {
+                    "time_10_30": "10:30",
+                    "time_14_30": "14:30",
+                    "time_18_30": "18:30"
+                }
+                selected_time = time_map[cmd]
+                
+                session = get_or_create_session(db, user_id, "vk")
+                session.lead_data = session.lead_data or {}
+                session.lead_data["time"] = selected_time
+                flag_modified(session, "lead_data")
+                db.commit()
+                
+                # Обновляем лид
+                lead = get_or_create_lead(f"vk_{user_id}", source="vk", park_id="nn")
+                update_lead_from_data(lead.id, {"time": selected_time})
+                
+                # Спрашиваем имя
+                await message.answer(
+                    f"⏰ Отлично, время {selected_time}!\n\n"
+                    "Напомните, пожалуйста, как вас зовут? (Имя для записи)"
+                )
                 
         except Exception as e:
             logger.error(f"Error handling payload: {e}")
@@ -569,10 +885,42 @@ def create_vk_bot(token: str, group_id: int):
         
         user_id = message.from_id
         
+        # --- ПРОВЕРКА ОПЕРАТОРА ---
+        # Если сообщение от группы (from_id < 0) — это оператор
+        if user_id < 0:
+            # Находим сессию получателя сообщения
+            peer_id = message.peer_id
+            if peer_id > 0:  # Личные сообщения
+                db = SessionLocal()
+                try:
+                    session = get_or_create_session(db, peer_id, "vk")
+                    
+                    # Проверяем команду /bot on — включить бота обратно
+                    if message_text.lower() in ["/bot on", "/boton", "бот вкл", "бот on"]:
+                        set_operator_active(session, db, active=False)
+                        await message.answer("🤖 Бот снова активен и отвечает на сообщения.")
+                    else:
+                        # Оператор пишет — выключаем бота
+                        set_operator_active(session, db, active=True)
+                finally:
+                    db.close()
+            return  # Не обрабатываем сообщения от группы
+        
         db = SessionLocal()
         try:
             # Получаем или создаём сессию
             session = get_or_create_session(db, user_id, "vk")
+            
+            # --- ПРОВЕРКА: оператор активен? ---
+            if is_operator_active(session):
+                # Оператор работает — бот молчит
+                logger.info(f"Bot is paused for user {user_id} (operator active), skipping response")
+                # Сохраняем сообщение пользователя для истории
+                user_msg = DBMessage(session_id=session.id, role="user", content=message_text)
+                db.add(user_msg)
+                db.commit()
+                db.close()
+                return
             
             # Сохраняем сообщение пользователя
             user_msg = DBMessage(session_id=session.id, role="user", content=message_text)
@@ -1182,6 +1530,40 @@ def create_vk_bot(token: str, group_id: int):
                             session.lead_data.pop("force_kids", None)
                             flag_modified(session, "lead_data")
                             db.commit()
+                        
+                        # Проверяем телефон в AmoCRM
+                        phone_from_crm = None
+                        name_from_crm = None
+                        try:
+                            contact = await amocrm_client.find_contact_by_vk_id(user_id)
+                            if contact:
+                                contact_info = amocrm_client.get_contact_info(contact)
+                                phone_from_crm = contact_info.get("phone")
+                                name_from_crm = contact_info.get("name")
+                        except Exception as e:
+                            logger.error(f"Error finding contact: {e}")
+                        
+                        if phone_from_crm:
+                            # Есть телефон — спрашиваем подтверждение
+                            phone_display = f"+7 {phone_from_crm[-10:-7]} {phone_from_crm[-7:-4]}-{phone_from_crm[-4:-2]}-{phone_from_crm[-2:]}" if len(phone_from_crm) >= 10 else phone_from_crm
+                            keyboard = (
+                                Keyboard(inline=True)
+                                .add(Text(f"✅ Да, {phone_display}", payload={"cmd": "confirm_phone_yes", "phone": phone_from_crm, "name": name_from_crm or ""}), color=KeyboardButtonColor.POSITIVE)
+                                .row()
+                                .add(Text("📱 Указать другой", payload={"cmd": "confirm_phone_no"}), color=KeyboardButtonColor.SECONDARY)
+                            ).get_json()
+                            
+                            greeting = f"Рады снова видеть вас, {name_from_crm}! 💚\n\n" if name_from_crm else ""
+                            await message.answer(
+                                f"👶 Отлично, {kids_count} детей!\n\n{greeting}📱 Актуален ли этот номер телефона для связи?\n{phone_display}",
+                                keyboard=keyboard
+                            )
+                            return
+                        else:
+                            # Нет телефона — спрашиваем
+                            await message.answer(f"👶 Отлично, {kids_count} детей!\n\n📱 Укажите номер телефона для связи:")
+                            return
+
 
                 # Если дата есть, но детей всё ещё нет — НЕ повторяем шаблонный вопрос!
                 # Пусть AI-агент обработает сообщение (например, ответит на вопрос "В смысле?")

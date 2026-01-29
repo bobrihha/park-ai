@@ -18,9 +18,6 @@ class AmoCRMClient:
     """Client for AmoCRM API v4."""
     
     def __init__(self):
-        # Проверяем флаг включения AmoCRM
-        self.enabled = os.getenv("AMOCRM_ENABLED", "true").lower() in ("true", "1", "yes")
-        
         self.domain = os.getenv("AMOCRM_DOMAIN", "")
         self.client_id = os.getenv("AMOCRM_CLIENT_ID", "")
         self.client_secret = os.getenv("AMOCRM_CLIENT_SECRET", "")
@@ -34,17 +31,7 @@ class AmoCRMClient:
         self._refresh_token: Optional[str] = None
         self._token_expires_at: Optional[datetime] = None
         
-        if self.enabled:
-            self._load_tokens()
-        else:
-            logger.info("AmoCRM DISABLED via AMOCRM_ENABLED=false")
-    
-    @property
-    def is_authorized(self) -> bool:
-        """Проверяет авторизацию (и включён ли модуль)."""
-        if not self.enabled:
-            return False
-        return bool(self._access_token)
+        self._load_tokens()
     
     def _load_tokens(self):
         """Load tokens from file."""
@@ -993,7 +980,6 @@ async def send_lead_to_amocrm(lead_data: Dict[str, Any], telegram_id: int = None
     """
     Convenience function to send a lead to AmoCRM.
     Uses find_or_create_contact for contact merging by phone.
-    If amocrm_deal_id exists in lead_data, updates existing deal instead of creating new.
     
     Args:
         lead_data: dict with keys: customer_name, phone, child_name, event_date, etc.
@@ -1025,15 +1011,7 @@ async def send_lead_to_amocrm(lead_data: Dict[str, Any], telegram_id: int = None
             logger.error("Failed to get/create contact")
             return None, None
         
-        # Проверяем, есть ли уже существующая сделка
-        existing_deal_id = lead_data.get("amocrm_deal_id")
-        if existing_deal_id:
-            # Обновляем существующую сделку
-            logger.info(f"Updating existing deal {existing_deal_id}")
-            await amocrm_client.update_deal_fields(int(existing_deal_id), lead_data)
-            return existing_deal_id, contact_id
-        
-        # Create new deal
+        # Create deal
         deal_id = await amocrm_client.create_deal(contact_id, lead_data)
         
         return deal_id, contact_id

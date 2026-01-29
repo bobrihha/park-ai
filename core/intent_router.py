@@ -43,6 +43,15 @@ EVENTS_TRIGGERS = [
     r'шоу\b', r'представлен', r'концерт', r'дискотек', r'анонс'
 ]
 
+# Триггеры для потерянных вещей
+LOST_ITEM_TRIGGERS = [
+    r'потеря[лаи]', r'потерял[аи]?', r'пропал[аои]?', r'утеря[нл]',
+    r'забыл[аи]?\s*(\w+\s+)?в\s*парке', r'оставил[аи]?\s*(\w+\s+)?в\s*парке',
+    r'бюро\s*находок', r'потерянн', r'потеряшк',
+    r'не\s*могу\s*найти', r'не\s*наш[ёлла]',
+    r'забыл[аи]?\s*вещ', r'оставил[аи]?\s*вещ'
+]
+
 
 def detect_intent_rules(message: str) -> IntentResult | None:
     """Определить намерение по правилам (быстро, без API)."""
@@ -67,8 +76,14 @@ def detect_intent_rules(message: str) -> IntentResult | None:
         if re.search(trigger, text):
             events_score += 1
     
+    # Проверяем триггеры потеряшек
+    lost_item_score = 0
+    for trigger in LOST_ITEM_TRIGGERS:
+        if re.search(trigger, text):
+            lost_item_score += 1
+    
     # Определяем победителя
-    scores = {'birthday': birthday_score, 'general': general_score, 'events': events_score}
+    scores = {'birthday': birthday_score, 'general': general_score, 'events': events_score, 'lost_item': lost_item_score}
     max_intent = max(scores, key=scores.get)
     max_score = scores[max_intent]
     
@@ -84,6 +99,12 @@ def detect_intent_rules(message: str) -> IntentResult | None:
                 intent="events",
                 confidence=min(0.7 + max_score * 0.1, 0.95),
                 reason=f"Найдено {max_score} триггеров афиши"
+            )
+        elif max_intent == 'lost_item':
+            return IntentResult(
+                intent="lost_item",
+                confidence=min(0.8 + max_score * 0.1, 0.95),
+                reason=f"Найдено {max_score} триггеров потеряшек"
             )
         else:
             return IntentResult(
@@ -106,9 +127,10 @@ def detect_intent_llm(message: str, history: list[dict] = None) -> IntentResult:
 Варианты:
 - birthday — если человек хочет организовать праздник, день рождения, выпускной, спрашивает про аниматоров, торты, комнаты, бронирование
 - general — если хочет узнать о посещении парка: цены, режим, правила, аттракционы, скидки, как добраться
+- lost_item — если человек потерял вещь в парке, забыл, оставил что-то, спрашивает про бюро находок
 - unknown — если непонятно (приветствие, нейтральный вопрос)
 
-Ответь ТОЛЬКО одним словом: birthday, general или unknown"""
+Ответь ТОЛЬКО одним словом: birthday, general, lost_item или unknown"""
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",  # Быстрая дешёвая модель для классификации
@@ -119,7 +141,7 @@ def detect_intent_llm(message: str, history: list[dict] = None) -> IntentResult:
     
     result = response.choices[0].message.content.strip().lower()
     
-    if result in ["birthday", "general", "unknown"]:
+    if result in ["birthday", "general", "lost_item", "unknown"]:
         return IntentResult(intent=result, confidence=0.7, reason="LLM классификация")
     
     return IntentResult(intent="unknown", confidence=0.5, reason="LLM вернул неожиданный ответ")

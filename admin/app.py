@@ -137,7 +137,48 @@ if st.sidebar.button("Выйти"):
     st.session_state.authenticated = False
     st.rerun()
 
+# ============ ВЫБОР ПАРКА ============
+st.sidebar.divider()
 
+# Загружаем список парков
+try:
+    from config.park_config import list_parks, get_park_info
+    available_parks = list_parks()
+except ImportError:
+    available_parks = ["nn"]
+
+# Названия парков для отображения
+park_names = {
+    "nn": "🌲 Нижний Новгород",
+    "msk": "🏙 Москва",
+    "spb": "🌊 Санкт-Петербург",
+    "kzn": "🕌 Казань",
+    "ekb": "⛰ Екатеринбург",
+}
+
+# Текущий парк
+if "current_park" not in st.session_state:
+    st.session_state.current_park = "nn"
+
+def on_park_change():
+    st.session_state.current_park = st.session_state.park_selector
+
+# Фильтруем только существующие парки
+park_options = [p for p in available_parks if p in park_names] or available_parks
+display_options = [park_names.get(p, p.upper()) for p in park_options]
+
+selected_index = park_options.index(st.session_state.current_park) if st.session_state.current_park in park_options else 0
+
+st.sidebar.selectbox(
+    "🏢 Парк",
+    park_options,
+    format_func=lambda x: park_names.get(x, x.upper()),
+    index=selected_index,
+    key="park_selector",
+    on_change=on_park_change
+)
+
+st.sidebar.divider()
 
 # Сайдбар для навигации
 PAGES = ["Заявки", "Клиенты", "Диалоги", "Команды бота", "Промпты", "База знаний", "Настройки"]
@@ -438,7 +479,7 @@ elif page == "Промпты":
         
         if st.button("🔄 Инициализировать промпты из кода"):
             try:
-                from config.prompts import BASE_SYSTEM_PROMPT, BIRTHDAY_PROMPT, GENERAL_PROMPT, EVENTS_PROMPT, CLARIFICATION_PROMPT
+                from config.prompts import _build_base_prompt, BIRTHDAY_PROMPT, GENERAL_PROMPT, EVENTS_PROMPT, CLARIFICATION_PROMPT
                 
                 db = SessionLocal()
                 
@@ -447,7 +488,7 @@ elif page == "Промпты":
                 
                 # Добавляем промпты из кода
                 prompts_to_add = [
-                    ("base", "Базовый промпт (личность Джуси)", BASE_SYSTEM_PROMPT),
+                    ("base", "Базовый промпт (личность Джуси)", _build_base_prompt()),
                     ("birthday", "День рождения — полный скрипт продажи", BIRTHDAY_PROMPT),
                     ("general", "Общие вопросы — ответы на вопросы о парке", GENERAL_PROMPT),
                     ("events", "Афиша — информация о мероприятиях", EVENTS_PROMPT),
@@ -786,10 +827,12 @@ elif page == "Заявки":
                     new_notes = st.text_area("Комментарий / Заметки", value=lead.notes or "", height=100)
                     
                     # Статус внутри формы
+                    status_options = ["new", "contacted", "booked", "cancelled", "deferred"]
+                    current_status = lead.status if lead.status in status_options else "new"
                     new_status = st.selectbox(
                         "Статус заявки",
-                        ["new", "contacted", "booked", "cancelled"],
-                        index=["new", "contacted", "booked", "cancelled"].index(lead.status)
+                        status_options,
+                        index=status_options.index(current_status)
                     )
                     
                     if st.form_submit_button("Сохранить изменения"):
@@ -866,47 +909,224 @@ elif page == "Заявки":
 
 # ============ НАСТРОЙКИ ============
 elif page == "Настройки":
-    st.markdown(f'{icon("settings")} <h2 style="display:inline">Настройки</h2>', unsafe_allow_html=True)
+    current_park = st.session_state.get("current_park", "nn")
+    park_display = park_names.get(current_park, current_park.upper())
     
-    st.subheader("Конфигурация парка")
-    st.code("""
-PARK_ID: nn
-NAME: Джунгли Сити Нижний Новгород
-PHONE: +7 (831) 213-50-50
-WHATSAPP: +7 (962) 509-74-93
-    """)
+    st.markdown(f'{icon("settings")} <h2 style="display:inline">Настройки: {park_display}</h2>', unsafe_allow_html=True)
     
-    st.subheader("Статус системы")
-    
-    # Проверяем подключения
+    # Загружаем текущую конфигурацию выбранного парка
     try:
-        db = SessionLocal()
-        session_count = db.query(DBSession).count()
-        message_count = db.query(Message).count()
-        doc_count = db.query(Document).count()
-        db.close()
-        
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Сессий", session_count)
-        col2.metric("Сообщений", message_count)
-        col3.metric("Документов", doc_count)
-        
-        st.success("✅ База данных подключена")
-    except Exception as e:
-        st.error(f"Ошибка БД: {e}")
+        from config.park_config import load_config, save_config, save_park_config
+        config = load_config(current_park)
+    except ImportError:
+        st.error("Модуль park_config не найден!")
+        config = {}
     
-    # Проверяем OpenAI
-    import os
-    if os.getenv("OPENAI_API_KEY"):
-        st.success("✅ OpenAI API настроен")
-    else:
-        st.error("OpenAI API ключ не найден")
+    tab1, tab2, tab3, tab4 = st.tabs(["💰 Цены", "📞 Контакты", "🕐 Расписание", "🔧 Система"])
     
-    # Проверяем Telegram
-    if os.getenv("TELEGRAM_BOT_TOKEN"):
-        st.success("✅ Telegram Bot Token настроен")
-    else:
-        st.error("Telegram Bot Token не найден")
+    # TAB 1: Цены
+    with tab1:
+        st.subheader("Цены на билеты")
+        st.caption("Изменения применяются мгновенно во всех ботах.")
+        
+        prices = config.get("prices", {})
+        
+        with st.form("prices_form"):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                new_monday = st.number_input(
+                    "🟢 Понедельник (₽)", 
+                    value=prices.get("monday", 990),
+                    min_value=0,
+                    step=10
+                )
+            
+            with col2:
+                new_weekday = st.number_input(
+                    "🔵 Будни вт-пт (₽)", 
+                    value=prices.get("weekday", 1190),
+                    min_value=0,
+                    step=10
+                )
+            
+            with col3:
+                new_weekend = st.number_input(
+                    "🔴 Выходные/праздники (₽)", 
+                    value=prices.get("weekend", 1590),
+                    min_value=0,
+                    step=10
+                )
+            
+            if st.form_submit_button("💾 Сохранить цены"):
+                config["prices"] = {
+                    "monday": new_monday,
+                    "weekday": new_weekday, 
+                    "weekend": new_weekend,
+                    "adults_free": True,
+                    "under_1_free": True
+                }
+                if save_config(config, current_park):
+                    st.success("✅ Цены сохранены!")
+                    st.rerun()
+                else:
+                    st.error("Ошибка сохранения!")
+        
+        # Скидки
+        st.divider()
+        st.subheader("Скидки")
+        
+        discounts = config.get("discounts", {})
+        
+        with st.form("discounts_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                d_kids_1_4 = st.number_input("Дети 1-4 лет (будни), %", value=discounts.get("kids_1_4_weekdays", 20), step=5)
+                d_large_family = st.number_input("Многодетные (вт-вс), %", value=discounts.get("large_family", 30), step=5)
+                d_after_20 = st.number_input("После 20:00, %", value=discounts.get("after_20", 50), step=5)
+            
+            with col2:
+                d_birthday = st.number_input("Именинник ±5 дней, %", value=discounts.get("birthday_person", 50), step=5)
+                d_disabled = st.number_input("Дети с инвалидностью (будни), %", value=discounts.get("disabled_weekdays", 100), step=5)
+                d_svo = st.number_input("Дети участников СВО, %", value=discounts.get("svo_children", 30), step=5)
+            
+            if st.form_submit_button("💾 Сохранить скидки"):
+                config["discounts"] = {
+                    "kids_1_4_weekdays": d_kids_1_4,
+                    "large_family": d_large_family,
+                    "after_20": d_after_20,
+                    "birthday_person": d_birthday,
+                    "disabled_weekdays": d_disabled,
+                    "svo_children": d_svo
+                }
+                if save_config(config, current_park):
+                    st.success("✅ Скидки сохранены!")
+                    st.rerun()
+                else:
+                    st.error("Ошибка сохранения!")
+    
+    # TAB 2: Контакты
+    with tab2:
+        st.subheader("Контактные данные")
+        
+        park = config.get("park", {})
+        phones = config.get("phones", {})
+        links = config.get("links", {})
+        
+        with st.form("contacts_form"):
+            st.markdown("**Парк**")
+            new_address = st.text_input("Адрес", value=park.get("address", ""))
+            
+            st.markdown("**Телефоны**")
+            col1, col2 = st.columns(2)
+            with col1:
+                new_phone_main = st.text_input("Основной телефон", value=phones.get("main", ""))
+            with col2:
+                new_phone_wa = st.text_input("WhatsApp", value=phones.get("whatsapp", ""))
+            
+            st.markdown("**Ссылки**")
+            col1, col2 = st.columns(2)
+            with col1:
+                new_site = st.text_input("Сайт", value=links.get("site", ""))
+                new_menu = st.text_input("Меню ресторана", value=links.get("menu", ""))
+                new_cakes = st.text_input("Торты", value=links.get("cakes", ""))
+            with col2:
+                new_afisha = st.text_input("Афиша", value=links.get("afisha", ""))
+                new_animators = st.text_input("Аниматоры", value=links.get("animators", ""))
+                new_telegram = st.text_input("Telegram канал", value=links.get("telegram", ""))
+            
+            if st.form_submit_button("💾 Сохранить контакты"):
+                config["park"] = {**park, "address": new_address}
+                config["phones"] = {"main": new_phone_main, "whatsapp": new_phone_wa}
+                config["links"] = {
+                    **links,
+                    "site": new_site, "menu": new_menu, "cakes": new_cakes,
+                    "afisha": new_afisha, "animators": new_animators, "telegram": new_telegram
+                }
+                if save_config(config, current_park):
+                    st.success("✅ Контакты сохранены!")
+                    st.rerun()
+                else:
+                    st.error("Ошибка сохранения!")
+    
+    # TAB 3: Расписание
+    with tab3:
+        st.subheader("Режим работы")
+        
+        schedule = config.get("schedule", {})
+        
+        with st.form("schedule_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Понедельник**")
+                mon_open = st.text_input("Открытие (Пн)", value=schedule.get("monday", {}).get("open", "12:00"))
+                mon_close = st.text_input("Закрытие (Пн)", value=schedule.get("monday", {}).get("close", "22:00"))
+                
+                st.markdown("**Будни (Вт-Вс)**")
+                wd_open = st.text_input("Открытие (Вт-Вс)", value=schedule.get("weekdays", {}).get("open", "10:00"))
+                wd_close = st.text_input("Закрытие (Вт-Вс)", value=schedule.get("weekdays", {}).get("close", "22:00"))
+            
+            with col2:
+                st.markdown("**Ограничения**")
+                entrance_until = st.text_input("Вход до", value=schedule.get("entrance_until", "21:00"))
+                restaurant_until = st.text_input("Ресторан до", value=schedule.get("restaurant_until", "21:00"))
+                birthday_until = st.text_input("Отдел праздников до", value=schedule.get("birthday_dept_until", "21:00"))
+            
+            if st.form_submit_button("💾 Сохранить расписание"):
+                config["schedule"] = {
+                    "monday": {"open": mon_open, "close": mon_close},
+                    "weekdays": {"open": wd_open, "close": wd_close},
+                    "weekends": {"open": wd_open, "close": wd_close},
+                    "entrance_until": entrance_until,
+                    "restaurant_until": restaurant_until,
+                    "birthday_dept_until": birthday_until
+                }
+                if save_config(config, current_park):
+                    st.success("✅ Расписание сохранено!")
+                    st.rerun()
+                else:
+                    st.error("Ошибка сохранения!")
+    
+    # TAB 4: Система (старый раздел)
+    with tab4:
+        st.subheader("Статус системы")
+        
+        # Проверяем подключения
+        try:
+            db = SessionLocal()
+            session_count = db.query(DBSession).count()
+            message_count = db.query(Message).count()
+            doc_count = db.query(Document).count()
+            db.close()
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Сессий", session_count)
+            col2.metric("Сообщений", message_count)
+            col3.metric("Документов", doc_count)
+            
+            st.success("✅ База данных подключена")
+        except Exception as e:
+            st.error(f"Ошибка БД: {e}")
+        
+        # Проверяем OpenAI
+        import os
+        if os.getenv("OPENAI_API_KEY"):
+            st.success("✅ OpenAI API настроен")
+        else:
+            st.error("OpenAI API ключ не найден")
+        
+        # Проверяем Telegram
+        if os.getenv("TELEGRAM_BOT_TOKEN"):
+            st.success("✅ Telegram Bot Token настроен")
+        else:
+            st.error("Telegram Bot Token не найден")
+        
+        st.divider()
+        st.subheader("Текущая конфигурация (JSON)")
+        st.json(config)
+
 
 
 # Футер

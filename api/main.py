@@ -49,7 +49,9 @@ from core.notifications import (
     format_lead_message,
     needs_human_escalation,
     needs_complaint_flow,
-    format_complaint_message
+    format_complaint_message,
+    needs_lost_item_flow,
+    format_lost_item_message,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -115,9 +117,20 @@ class ChatRequest(BaseModel):
     user_phone: Optional[str] = None
 
 
+class ButtonData(BaseModel):
+    text: str
+    callback: str
+
+
 class ChatResponse(BaseModel):
     reply: str
     session_id: str
+    buttons: Optional[list] = None  # Список кнопок для UI
+
+
+class CallbackRequest(BaseModel):
+    session_id: str
+    callback: str  # Например: "format_room", "time_10_30"
 
 
 class RegisterRequest(BaseModel):
@@ -179,6 +192,209 @@ async def register_user(request: RegisterRequest):
     except Exception as e:
         logger.error(f"Registration error: {e}")
         return {"status": "error", "message": str(e)}
+
+
+@app.post("/chat/callback", response_model=ChatResponse)
+async def chat_callback(request: CallbackRequest):
+    """
+    Обработка нажатий на кнопки в веб-чате.
+    Возвращает следующее сообщение и, возможно, новые кнопки.
+    """
+    try:
+        db = SessionLocal()
+        session_id = request.session_id
+        callback = request.callback
+        
+        # Ищем сессию
+        session = db.query(DBSession).filter(
+            DBSession.telegram_id == session_id
+        ).first()
+        
+        if not session:
+            db.close()
+            return ChatResponse(
+                reply="Сессия не найдена. Напишите любое сообщение чтобы начать.",
+                session_id=session_id,
+                buttons=None
+            )
+        
+        session.lead_data = session.lead_data or {}
+        reply_text = ""
+        buttons = None
+        
+        if callback == "format_room":
+            # Выбрали тематическую комнату
+            session.lead_data["format"] = "Тематическая комната"
+            flag_modified(session, "lead_data")
+            db.commit()
+            
+            # Обновляем лид если есть
+            lead = db.query(Lead).filter(
+                Lead.telegram_id == session_id,
+                Lead.park_id == "nn",
+                Lead.status.in_(["new", "contacted"])
+            ).first()
+            if lead:
+                update_lead_from_data(lead.id, {"format": "Тематическая комната"})
+            
+            reply_text = "🏠 Отлично, тематическая комната!\n\nВыберите удобное время начала:"
+            buttons = [
+                {"text": "🕥 10:30", "callback": "time_10_30"},
+                {"text": "🕝 14:30", "callback": "time_14_30"},
+                {"text": "🕡 18:30", "callback": "time_18_30"}
+            ]
+            
+        elif callback == "format_zone":
+            # Выбрали ресторан
+            session.lead_data["format"] = "Ресторан"
+            flag_modified(session, "lead_data")
+            db.commit()
+            
+            # Обновляем лид если есть
+            lead = db.query(Lead).filter(
+                Lead.telegram_id == session_id,
+                Lead.park_id == "nn",
+                Lead.status.in_(["new", "contacted"])
+            ).first()
+            if lead:
+                update_lead_from_data(lead.id, {"format": "Ресторан"})
+                mark_lead_sent_to_manager(lead.id)
+                
+                # Создаём/обновляем сделку в AmoCRM
+                try:
+                    lead_data = lead_to_dict(lead)
+                    lead_data["source"] = "web"
+                    result = await send_lead_to_amocrm(lead_data)
+                    if result and result[0]:
+                        save_amocrm_deal_id(lead.id, str(result[0]))
+                except Exception as e:
+                    logger.error(f"AmoCRM error: {e}")
+                
+                # Уведомляем менеджеров
+                try:
+                    msg_text = format_lead_message("web", session_id, lead_to_dict(lead))
+                    await send_to_birthday_channel(msg_text)
+                except Exception as e:
+                    logger.error(f"Notify error: {e}")
+            
+            # Показываем сообщение с кнопками допуслуг (как на скриншоте)
+            reply_text = (
+                "🍰 Записал столик в ресторане!\n\n"
+                "Менеджер из отдела праздников скоро свяжется с вами 🧚\n\n"
+                "А пока вы ждёте — у нас есть своя кондитерская! 🎂\n"
+                "Можете выбрать торт к празднику или посмотреть другие услуги:"
+            )
+            buttons = [
+                {"text": "🎂 Посмотреть торты", "callback": "view_cakes"},
+                {"text": "🎭 Аниматоры и шоу", "callback": "view_animators"},
+                {"text": "🎁 Пакеты под ключ", "callback": "view_packages"}
+            ]
+
+
+            
+        elif callback in ("time_10_30", "time_14_30", "time_18_30"):
+            # Выбрали время
+            time_map = {
+                "time_10_30": "10:30",
+                "time_14_30": "14:30",
+                "time_18_30": "18:30"
+            }
+            selected_time = time_map[callback]
+            
+            session.lead_data["time"] = selected_time
+            flag_modified(session, "lead_data")
+            db.commit()
+            
+            # Обновляем лид если есть
+            lead = db.query(Lead).filter(
+                Lead.telegram_id == session_id,
+                Lead.park_id == "nn",
+                Lead.status.in_(["new", "contacted"])
+            ).first()
+            if lead:
+                update_lead_from_data(lead.id, {"time": selected_time})
+                mark_lead_sent_to_manager(lead.id)
+                
+                # Создаём/обновляем сделку в AmoCRM
+                try:
+                    lead_data = lead_to_dict(lead)
+                    lead_data["source"] = "web"
+                    result = await send_lead_to_amocrm(lead_data)
+                    if result and result[0]:
+                        save_amocrm_deal_id(lead.id, str(result[0]))
+                except Exception as e:
+                    logger.error(f"AmoCRM error: {e}")
+                
+                # Уведомляем менеджеров
+                try:
+                    msg_text = format_lead_message("web", session_id, lead_to_dict(lead))
+                    await send_to_birthday_channel(msg_text)
+                except Exception as e:
+                    logger.error(f"Notify error: {e}")
+            
+            # Показываем сообщение с кнопками допуслуг (как на скриншоте)
+            reply_text = (
+                f"⏰ Записал на {selected_time}!\n\n"
+                f"Менеджер из отдела праздников скоро свяжется с вами 🧚\n\n"
+                f"А пока вы ждёте — у нас есть своя кондитерская! 🎂\n"
+                f"Можете выбрать торт к празднику или посмотреть другие услуги:"
+            )
+            buttons = [
+                {"text": "🎂 Посмотреть торты", "callback": "view_cakes"},
+                {"text": "🎭 Аниматоры и шоу", "callback": "view_animators"},
+                {"text": "🎁 Пакеты под ключ", "callback": "view_packages"}
+            ]
+
+        elif callback == "view_cakes":
+            reply_text = (
+                "🎂 Наша кондитерская!\n\n"
+                "У нас есть торты на любой вкус — от классических до тематических с персонажами!\n\n"
+                "📱 Посмотреть каталог: https://catalog.botcicada.ru/menu.html\n\n"
+                "Также можно принести свой торт (сбор 1000₽ за вынос торта).\n\n"
+                "Если нужна помощь с выбором — пишите, подскажу! 😊"
+            )
+
+        elif callback == "view_animators":
+            reply_text = (
+                "🎭 Аниматоры и шоу!\n\n"
+                "У нас есть:\n"
+                "• Тематические программы с персонажами\n"
+                "• Квесты и приключения\n"
+                "• Научные шоу\n"
+                "• Мастер-классы\n"
+                "• Аквагрим\n\n"
+                "📱 Каталог программ: https://catalog.botcicada.ru/animation.html\n\n"
+                "Менеджер поможет подобрать идеальную программу под возраст и интересы! 🎉"
+            )
+
+        elif callback == "view_packages":
+            reply_text = (
+                "🎁 Пакеты праздников!\n\n"
+                "🌴 «Джунгли зовут» (5 детей) — от 9 660₽\n"
+                "Билеты + поздравление от Джуси + угощения\n\n"
+                "🦁 «Большое сафари» (7 детей) — от 16 050₽\n"
+                "Билеты + анимация 60 мин + угощения\n\n"
+                "🌴 «Тропический переполох» (10 детей) — от 25 850₽\n"
+                "Билеты + анимация + мини-шоу + шары + угощения\n\n"
+                "📱 Подробнее: https://catalog.botcicada.ru/packages.html\n\n"
+                "Расскажите что хотите — и я помогу выбрать! 😊"
+            )
+
+        
+        else:
+            reply_text = "Неизвестная команда. Напишите, чем могу помочь?"
+        
+        db.close()
+        
+        return ChatResponse(
+            reply=reply_text,
+            session_id=session_id,
+            buttons=buttons
+        )
+        
+    except Exception as e:
+        logger.error(f"Callback error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -388,6 +604,129 @@ async def chat(request: ChatRequest):
             return ChatResponse(reply=response, session_id=session_id)
         # ============ КОНЕЦ ЖАЛОБЫ ============
         
+        # ============ ПОТЕРЯШКИ — обработка потерянных вещей ============
+        if session.intent == "lost_item" or needs_lost_item_flow(request.message):
+            # Переключаем intent
+            if session.intent != "lost_item":
+                session.intent = "lost_item"
+                db.commit()
+                logger.info(f"Intent switched to lost_item")
+            
+            # Инициализируем lost_step если нет
+            if not session.lead_data:
+                session.lead_data = {}
+            
+            lost_step = session.lead_data.get("lost_step", "")
+            text_lower = request.message.lower()
+            
+            # Если пользователь хочет выйти из опроса
+            exit_keywords = ["нет", "другой вопрос", "не потерял", "ошибка", "отмена", "всё хорошо"]
+            if lost_step and any(kw in text_lower for kw in exit_keywords):
+                session.intent = "unknown"
+                session.lead_data = {}
+                flag_modified(session, "lead_data")
+                db.commit()
+                
+                response = "Понял! 😊 Тогда чем могу помочь? Спрашивайте о парке, ценах или празднике! 💚"
+                bot_message = Message(session_id=session.id, role="assistant", content=response)
+                db.add(bot_message)
+                db.commit()
+                db.close()
+                return ChatResponse(reply=response, session_id=session_id)
+            
+            # Обработка по шагам
+            if lost_step == "date":
+                # Сохраняем дату
+                session.lead_data["lost_date"] = request.message
+                session.lead_data["lost_step"] = "location"
+                flag_modified(session, "lead_data")
+                db.commit()
+                
+                response = "📍 В каком месте парка (или рядом с каким аттракционом) вы потеряли вещь?"
+                bot_message = Message(session_id=session.id, role="assistant", content=response)
+                db.add(bot_message)
+                db.commit()
+                db.close()
+                return ChatResponse(reply=response, session_id=session_id)
+            
+            elif lost_step == "location":
+                # Сохраняем место
+                session.lead_data["lost_location"] = request.message
+                session.lead_data["lost_step"] = "description"
+                flag_modified(session, "lead_data")
+                db.commit()
+                
+                response = "🔍 Опишите, пожалуйста, что именно вы потеряли (внешний вид, особые приметы):"
+                bot_message = Message(session_id=session.id, role="assistant", content=response)
+                db.add(bot_message)
+                db.commit()
+                db.close()
+                return ChatResponse(reply=response, session_id=session_id)
+            
+            elif lost_step == "description":
+                # Сохраняем описание и завершаем
+                session.lead_data["lost_description"] = request.message
+                session.lead_data["lost_step"] = "done"
+                flag_modified(session, "lead_data")
+                db.commit()
+                
+                # Получаем данные пользователя
+                user_name = session.lead_data.get("customer_name", "Не указано")
+                user_phone = session.lead_data.get("phone", "Не указан")
+                lost_date = session.lead_data.get("lost_date", "Не указано")
+                lost_location = session.lead_data.get("lost_location", "Не указано")
+                lost_description = request.message
+                
+                # Формируем и отправляем уведомление
+                lost_msg = format_lost_item_message(
+                    platform="web",
+                    user_id=session_id,
+                    user_name=user_name,
+                    lost_date=lost_date,
+                    lost_location=lost_location,
+                    lost_description=lost_description,
+                    phone=user_phone if user_phone != "Не указан" else None
+                )
+                await send_to_managers(lost_msg)
+                logger.info(f"Lost item notification sent for web user {user_name}")
+                
+                # Сбрасываем intent
+                session.intent = "unknown"
+                session.lead_data["lost_step"] = ""
+                flag_modified(session, "lead_data")
+                db.commit()
+                
+                response = (
+                    "✅ Спасибо за информацию!\n\n"
+                    "Ваше сообщение передано в бюро находок. "
+                    "Если вещь будет найдена — мы обязательно свяжемся с вами!\n\n"
+                    "📞 Также можете позвонить нам: +7 (831) 213-50-50\n\n"
+                    "Чем ещё могу помочь? 💚"
+                )
+                bot_message = Message(session_id=session.id, role="assistant", content=response)
+                db.add(bot_message)
+                db.commit()
+                db.close()
+                return ChatResponse(reply=response, session_id=session_id)
+            
+            # Первый шаг — спрашиваем дату
+            session.lead_data["lost_step"] = "date"
+            flag_modified(session, "lead_data")
+            db.commit()
+            
+            response = (
+                "Ой-ой, это неприятно! 😟 Но не переживайте — мы поможем!\n\n"
+                "Давайте я передам информацию в бюро находок.\n\n"
+                "📅 Когда примерно вы были в парке и могли потерять вещь?"
+            )
+            bot_message = Message(session_id=session.id, role="assistant", content=response)
+            db.add(bot_message)
+            db.commit()
+            db.close()
+            return ChatResponse(reply=response, session_id=session_id)
+        # ============ КОНЕЦ ПОТЕРЯШКИ ============
+
+        
         # ============ BIRTHDAY WELCOME — приветственное сообщение как в TG/VK ============
         if (intent_just_switched_to_birthday or start_new_booking) and not parsed_date_in_message:
             birthday_welcome = BIRTHDAY_WELCOME_MESSAGE
@@ -499,6 +838,12 @@ async def chat(request: ChatRequest):
                 db.commit()
                 db.close()
                 return ChatResponse(reply=response, session_id=session_id)
+            # Дата не распознана и ещё нет event_date — пометим для возврата после AI ответа
+            elif not lead_data.get("event_date"):
+                session.lead_data = session.lead_data or {}
+                session.lead_data["defer_date_request"] = True
+                flag_modified(session, "lead_data")
+                db.commit()
 
             # Если дата есть, но детей ещё нет — задаём следующий вопрос с ценой
             force_kids = session.lead_data.get("force_kids") if session.lead_data else None
@@ -783,6 +1128,17 @@ async def chat(request: ChatRequest):
                     if is_room and not lead_data.get("time"):
                         if "слот" not in response.lower() and "время" not in response.lower():
                             response += "\n\n⏰ На какое время? Слоты: 10:30, 14:30, 18:30"
+
+                # Обработка defer_date_request — напоминание о дате
+                defer_date = None
+                if session.lead_data and session.lead_data.get("defer_date_request"):
+                    defer_date = True
+                    session.lead_data.pop("defer_date_request", None)
+                    flag_modified(session, "lead_data")
+                    db.commit()
+                if defer_date and lead_data and not lead_data.get("event_date"):
+                    if "дат" not in response.lower() and "когда" not in response.lower():
+                        response += "\n\n📅 На какую дату планируете праздник?"
         
         # Сохраняем ответ бота
         bot_message = Message(
@@ -840,12 +1196,56 @@ async def chat(request: ChatRequest):
                 mark_lead_sent_to_manager(current_lead.id)
                 logger.info(f"Manager notification sent for Lead #{current_lead.id}")
         
-        
         db.close()
+        
+        # Определяем, нужны ли кнопки в ответе
+        # Логика на основе состояния данных, а не текста
+        buttons = None
+        
+        # Если есть дата, количество детей и телефон, но нет формата — показываем выбор формата
+        if (lead_data.get("event_date") and 
+            lead_data.get("kids_count") and 
+            lead_data.get("phone") and 
+            not lead_data.get("format")):
+            buttons = [
+                {"text": "🏠 Комната", "callback": "format_room"},
+                {"text": "🍰 Ресторан", "callback": "format_zone"}
+            ]
+        # Если выбрана комната, но нет времени — показываем слоты
+        elif (lead_data.get("format") and 
+              "комнат" in (lead_data.get("format") or "").lower() and 
+              not lead_data.get("time")):
+            buttons = [
+                {"text": "🕥 10:30", "callback": "time_10_30"},
+                {"text": "🕝 14:30", "callback": "time_14_30"},
+                {"text": "🕡 18:30", "callback": "time_18_30"}
+            ]
+        # Fallback: проверяем текст ответа, но только если формат/время ещё не выбраны
+        else:
+            response_lower = response.lower()
+            # Показываем кнопки формата только если он ещё не выбран
+            if not lead_data.get("format"):
+                if (("комнат" in response_lower and "ресторан" in response_lower) or 
+                    "формат праздника" in response_lower or 
+                    "какой формат" in response_lower):
+                    buttons = [
+                        {"text": "🏠 Комната", "callback": "format_room"},
+                        {"text": "🍰 Ресторан", "callback": "format_zone"}
+                    ]
+            # Показываем кнопки времени только если формат = комната и время ещё не выбрано
+            if not buttons and lead_data.get("format") and "комнат" in (lead_data.get("format") or "").lower() and not lead_data.get("time"):
+                if "слот" in response_lower or ("время" in response_lower and any(x in response_lower for x in ["10:30", "14:30", "18:30"])):
+                    buttons = [
+                        {"text": "🕥 10:30", "callback": "time_10_30"},
+                        {"text": "🕝 14:30", "callback": "time_14_30"},
+                        {"text": "🕡 18:30", "callback": "time_18_30"}
+                    ]
+
         
         return ChatResponse(
             reply=response,
-            session_id=session_id
+            session_id=session_id,
+            buttons=buttons
         )
         
     except Exception as e:

@@ -5,9 +5,17 @@ from typing import Optional
 
 def get_prices_from_knowledge(park_id: str = "nn") -> dict:
     """
-    Парсит файл prices.txt и возвращает словарь с ценами.
-    Если не находит, возвращает дефолтные значения.
+    Возвращает цены из централизованной конфигурации.
+    Fallback на парсинг файла если конфигурация недоступна.
     """
+    # Используем централизованную конфигурацию
+    try:
+        from config.park_config import get_prices
+        return get_prices()
+    except ImportError:
+        pass
+    
+    # Fallback: парсим файл prices.txt
     default_prices = {
         "monday": 990,
         "weekday": 1190,
@@ -15,7 +23,6 @@ def get_prices_from_knowledge(park_id: str = "nn") -> dict:
     }
     
     try:
-        # Путь к файлу цен
         root = Path(__file__).parent.parent
         file_path = root / "knowledge" / park_id / "general" / "prices.txt"
         
@@ -26,17 +33,14 @@ def get_prices_from_knowledge(park_id: str = "nn") -> dict:
         
         prices = default_prices.copy()
         
-        # Понедельник
         monday_match = re.search(r"Понедельник[^:]*:.*?(\d+)\s*руб", content, re.IGNORECASE)
         if monday_match:
             prices["monday"] = int(monday_match.group(1))
             
-        # Будни
         weekday_match = re.search(r"Будни[^:]*:.*?(\d+)\s*руб", content, re.IGNORECASE)
         if weekday_match:
             prices["weekday"] = int(weekday_match.group(1))
             
-        # Выходные
         weekend_match = re.search(r"Выходные[^:]*:.*?(\d+)\s*руб", content, re.IGNORECASE)
         if weekend_match:
             prices["weekend"] = int(weekend_match.group(1))
@@ -57,6 +61,103 @@ def get_prices_text(park_id: str = "nn") -> str:
     except:
         pass
     return ""
+
+
+def get_price_for_date(event_date: date, park_id: str = "nn") -> int:
+    """
+    Получить цену билета для конкретной даты.
+    
+    Returns:
+        Цена билета в рублях
+    """
+    prices = get_prices_from_knowledge(park_id)
+    
+    # Праздничные дни (всегда выходной тариф)
+    holidays = [
+        (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7), (1, 8),  # Новогодние
+        (2, 23),  # 23 февраля
+        (3, 8),   # 8 марта
+        (5, 1), (5, 9),  # Май
+        (6, 12),  # День России
+        (11, 4),  # День народного единства
+    ]
+    
+    if (event_date.month, event_date.day) in holidays:
+        return prices.get("weekend", 1590)
+    
+    weekday = event_date.weekday()  # 0=пн, 6=вс
+    
+    if weekday == 0:  # Понедельник
+        return prices.get("monday", 990)
+    elif weekday < 5:  # Вт-Пт
+        return prices.get("weekday", 1190)
+    else:  # Сб-Вс
+        return prices.get("weekend", 1590)
+
+
+def calculate_birthday_price(
+    event_date: date,
+    kids_count: int,
+    format_type: str = "room",  # room или zone
+    park_id: str = "nn"
+) -> dict:
+    """
+    Рассчитать стоимость дня рождения.
+    
+    Args:
+        event_date: Дата мероприятия
+        kids_count: Общее количество детей (включая именинника)
+        format_type: Формат: "room" (комната) или "zone" (ресторан/зона)
+        park_id: ID парка
+        
+    Returns:
+        dict с полями: ticket_price, paying_kids, total_price, format_name, description
+    """
+    ticket_price = get_price_for_date(event_date, park_id)
+    
+    if format_type == "room":
+        # Комната: именинник БЕСПЛАТНО
+        paying_kids = max(0, kids_count - 1)
+        total = paying_kids * ticket_price
+        format_name = "🏠 Тематическая комната"
+        description = f"{paying_kids} дет. × {ticket_price}₽ = {total:,}₽ (именинник бесплатно!)"
+    else:
+        # Ресторан/зона: именинник -50%
+        paying_kids = max(0, kids_count - 1)
+        birthday_price = ticket_price // 2
+        total = paying_kids * ticket_price + birthday_price
+        format_name = "🍰 Столик в ресторане"
+        description = f"{paying_kids} × {ticket_price}₽ + {birthday_price}₽ (именинник -50%) = {total:,}₽"
+    
+    return {
+        "ticket_price": ticket_price,
+        "paying_kids": paying_kids,
+        "total_price": total,
+        "format_name": format_name,
+        "description": description
+    }
+
+
+def format_birthday_price_options(event_date: date, kids_count: int, park_id: str = "nn") -> str:
+    """
+    Форматировать предложение выбора формата с расчётом цен.
+    
+    Returns:
+        Текст для отправки пользователю
+    """
+    room_calc = calculate_birthday_price(event_date, kids_count, "room", park_id)
+    zone_calc = calculate_birthday_price(event_date, kids_count, "zone", park_id)
+    
+    text = (
+        f"📞 Отлично, записал!\n\n"
+        f"Давайте выберем формат праздника! 💚\n\n"
+        f"{room_calc['format_name']} — 3 часа\n"
+        f"Для {kids_count} детей: {room_calc['description']}\n\n"
+        f"{zone_calc['format_name']} — без ограничений по времени\n"
+        f"Для {kids_count} детей: {zone_calc['description']}\n\n"
+        f"Какой формат вам ближе — комната или ресторан? 😊"
+    )
+    return text
 
 
 def format_phone(phone: str) -> str:
@@ -195,7 +296,9 @@ _WEEKDAYS_RU = [
     "воскресенье",
 ]
 
-_HOLIDAYS = {
+# Праздники теперь загружаются из park_config
+# Локальный fallback для обратной совместимости
+_HOLIDAYS_FALLBACK = {
     (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7), (1, 8),
     (2, 23),
     (3, 8),
@@ -238,7 +341,7 @@ def parse_user_date(text: str, now: datetime | None = None) -> date | None:
         return _next_weekday(today, 5)
 
     # Numeric formats: dd.mm.yyyy, dd/mm/yyyy, dd-mm-yyyy
-    match = re.search(r"(\\d{1,2})[./-](\\d{1,2})[./-](\\d{4})", t)
+    match = re.search(r"(\d{1,2})[./-](\d{1,2})[./-](\d{4})", t)
     if match:
         day, month, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
         try:
@@ -247,7 +350,7 @@ def parse_user_date(text: str, now: datetime | None = None) -> date | None:
             return None
 
     # Numeric formats without year: dd.mm or dd/mm or dd-mm
-    match = re.search(r"(\\d{1,2})[./-](\\d{1,2})", t)
+    match = re.search(r"(\d{1,2})[./-](\d{1,2})", t)
     if match:
         day, month = int(match.group(1)), int(match.group(2))
         year = today.year
@@ -263,7 +366,7 @@ def parse_user_date(text: str, now: datetime | None = None) -> date | None:
         return candidate
 
     # "25 января" / "25 янв 2026"
-    match = re.search(r"(\\d{1,2})\\s*([а-яё]+)(?:\\s*(\\d{4}))?", t)
+    match = re.search(r"(\d{1,2})\s*([а-яё]+)(?:\s*(\d{4}))?", t)
     if match:
         day = int(match.group(1))
         month_name = match.group(2)
@@ -297,7 +400,12 @@ def format_weekday_ru(d: date, capitalize: bool = False) -> str:
 
 
 def is_holiday(d: date) -> bool:
-    return (d.month, d.day) in _HOLIDAYS
+    """Проверить является ли дата праздничной."""
+    try:
+        from config.park_config import is_holiday as config_is_holiday
+        return config_is_holiday(d.month, d.day)
+    except ImportError:
+        return (d.month, d.day) in _HOLIDAYS_FALLBACK
 
 
 def get_birthday_price_for_date(d: date, prices: dict | None = None) -> int:
@@ -329,12 +437,35 @@ def parse_kids_count(text: str, max_count: int = 60) -> Optional[int]:
     t = text.lower().strip()
 
     # Avoid time like 10:30
-    if re.search(r"\b\d{1,2}[:.]\d{2}\b", t):
+    if re.search(r"\b\d{1,2}[:]\d{2}\b", t):
         return None
 
     # Avoid phone-like numbers (10-11 digits)
     if re.search(r"\b[789]\d{9,10}\b", t):
         return None
+    
+    # --- ДИАПАЗОН ДЕТЕЙ: "5-7", "от 5 до 7", "5 или 7" ---
+    # Берём максимальное значение из диапазона
+    range_match = re.search(r"(\d{1,2})\s*[-–—]\s*(\d{1,2})", t)
+    if range_match:
+        n1, n2 = int(range_match.group(1)), int(range_match.group(2))
+        # Если оба числа <= max_count — это диапазон детей
+        if 1 <= n1 <= max_count and 1 <= n2 <= max_count:
+            return max(n1, n2)
+    
+    # "от X до Y"
+    range_match2 = re.search(r"от\s*(\d{1,2})\s*до\s*(\d{1,2})", t)
+    if range_match2:
+        n1, n2 = int(range_match2.group(1)), int(range_match2.group(2))
+        if 1 <= n1 <= max_count and 1 <= n2 <= max_count:
+            return max(n1, n2)
+    
+    # "X или Y"
+    range_match3 = re.search(r"(\d{1,2})\s*или\s*(\d{1,2})", t)
+    if range_match3:
+        n1, n2 = int(range_match3.group(1)), int(range_match3.group(2))
+        if 1 <= n1 <= max_count and 1 <= n2 <= max_count:
+            return max(n1, n2)
 
     # Pure digits (1-2 digits)
     if re.fullmatch(r"\d{1,2}", t):
@@ -500,7 +631,10 @@ def build_format_choice_message(event_date_str: str, kids_count: int) -> str | N
     if not event_date_str or not kids_count:
         return None
 
-    date_obj = parse_user_date(event_date_str)
+    raw_date = event_date_str.strip()
+    cleaned_date = re.split(r"[—–-]", raw_date)[0].strip()
+    cleaned_date = re.split(r"[!,\\.]", cleaned_date)[0].strip()
+    date_obj = parse_user_date(cleaned_date) or parse_user_date(raw_date)
     if not date_obj:
         return None
 
@@ -520,3 +654,75 @@ def build_format_choice_message(event_date_str: str, kids_count: int) -> str | N
         f"Для {kids_count} детей: {paid_rest} × {price}₽ + 1 × {half}₽ (именинник -50%) = {_format_money(restaurant_cost)}₽\n\n"
         "Какой формат предпочитаете — комната или ресторан?"
     )
+
+
+def should_defer_format_request(message: str) -> bool:
+    """Return True if user asks for info during format choice step."""
+    if not message:
+        return False
+
+    text = message.lower().strip()
+
+    # Direct selection should not defer
+    if extract_format_from_message(text):
+        return False
+
+    # Ignore obvious structured inputs
+    if extract_phone_from_message(text):
+        return False
+    if parse_kids_count(text):
+        return False
+    if parse_user_date(text):
+        return False
+    if re.search(r"\b\d{1,2}[:.]\d{2}\b", text):
+        return False
+
+    if re.fullmatch(r"(да|нет|ок|ага|конечно|верно|правильно|неа)", text):
+        return False
+
+    info_keywords = [
+        "чем", "разниц", "отлич", "что", "какие", "почему",
+        "услов", "включ", "стоимость", "цена", "формат",
+        "комната", "ресторан", "столик",
+    ]
+
+    return "?" in text or any(k in text for k in info_keywords)
+
+
+def parse_time_from_message(message: str) -> str | None:
+    """Extract time like 10:30 or 10.30 from message and return HH:MM."""
+    if not message:
+        return None
+
+    text = message.strip()
+    m = re.search(r"\b([01]?\d|2[0-3])[:. ]([0-5]\d)\b", text)
+    if not m:
+        return None
+
+    hour = int(m.group(1))
+    minute = int(m.group(2))
+    return f"{hour:02d}:{minute:02d}"
+
+
+def should_defer_time_request(message: str) -> bool:
+    """Return True if user asks a question instead of providing a time slot."""
+    if not message:
+        return False
+
+    text = message.lower().strip()
+
+    if parse_time_from_message(text):
+        return False
+
+    if parse_user_date(text) or parse_kids_count(text) or extract_phone_from_message(text):
+        return False
+
+    if re.fullmatch(r"(да|нет|ок|ага|конечно|верно|правильно|неа)", text):
+        return False
+
+    info_keywords = [
+        "друг", "есть", "можно", "какое", "когда", "во сколько",
+        "вариант", "слот", "время", "подойдет", "удобно",
+    ]
+
+    return "?" in text or any(k in text for k in info_keywords)

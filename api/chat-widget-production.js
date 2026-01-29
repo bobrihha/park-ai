@@ -12,8 +12,7 @@
 
     // Конфигурация
     const CONFIG = {
-        apiUrl: document.currentScript?.getAttribute('data-api') || 'http://localhost:8000',
-        callbackUrl: document.currentScript?.getAttribute('data-callback') || 'http://localhost:8000/chat/callback',
+        apiUrl: document.currentScript?.getAttribute('data-api') || 'http://95.81.99.32:8000',
         primaryColor: '#43348b',
         secondaryColor: '#43348b',
         botName: 'Джунгли Сити',
@@ -400,32 +399,6 @@
             background: ${CONFIG.primaryColor};
             color: white;
             border-color: ${CONFIG.primaryColor};
-        }
-
-        /* Action buttons (формат/время) */
-        .jc-action-buttons {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            padding: 8px 16px;
-            background: #F9FAFB;
-        }
-
-        .jc-action-btn {
-            background: ${CONFIG.primaryColor};
-            color: white;
-            border: none;
-            padding: 10px 16px;
-            border-radius: 20px;
-            font-size: 14px;
-            cursor: pointer;
-            transition: all 0.2s;
-            font-weight: 500;
-        }
-
-        .jc-action-btn:hover {
-            transform: scale(1.05);
-            box-shadow: 0 4px 12px rgba(67, 52, 139, 0.4);
         }
 
         #jc-chat-input-area {
@@ -838,11 +811,6 @@
                 this.sessionId = data.session_id;
                 localStorage.setItem('jc_chat_session', this.sessionId);
 
-                // Показываем action buttons если есть
-                if (data.buttons && data.buttons.length > 0) {
-                    this.showActionButtons(data.buttons);
-                }
-
             } catch (error) {
                 console.error('Chat error:', error);
                 this.hideTyping();
@@ -851,69 +819,6 @@
 
             this.isLoading = false;
             this.sendBtn.disabled = false;
-            this.saveHistory();
-        }
-
-        showActionButtons(buttons) {
-            // Удаляем старые action buttons
-            const oldBtns = document.querySelector('.jc-action-buttons');
-            if (oldBtns) oldBtns.remove();
-
-            const container = document.createElement('div');
-            container.className = 'jc-action-buttons';
-
-            buttons.forEach(btn => {
-                const button = document.createElement('button');
-                button.className = 'jc-action-btn';
-                button.textContent = btn.text;
-                button.addEventListener('click', () => this.handleCallback(btn.callback, btn.text));
-                container.appendChild(button);
-            });
-
-            this.messages.appendChild(container);
-            this.scrollToBottom();
-        }
-
-        async handleCallback(callback, buttonText) {
-            // Удаляем кнопки после нажатия
-            const actionBtns = document.querySelector('.jc-action-buttons');
-            if (actionBtns) actionBtns.remove();
-
-            // Показываем выбор как сообщение пользователя
-            this.addMessage(buttonText, 'user');
-            this.saveHistory();
-
-            this.showTyping();
-            this.isLoading = true;
-
-            try {
-                const response = await fetch(CONFIG.callbackUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        session_id: this.sessionId,
-                        callback: callback
-                    })
-                });
-
-                if (!response.ok) throw new Error('Callback error');
-
-                const data = await response.json();
-                this.hideTyping();
-                this.addMessage(data.reply, 'bot');
-
-                // Показываем новые кнопки если есть
-                if (data.buttons && data.buttons.length > 0) {
-                    this.showActionButtons(data.buttons);
-                }
-
-            } catch (error) {
-                console.error('Callback error:', error);
-                this.hideTyping();
-                this.addMessage('Произошла ошибка. Попробуйте ещё раз.', 'bot');
-            }
-
-            this.isLoading = false;
             this.saveHistory();
         }
 

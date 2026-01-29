@@ -598,7 +598,10 @@ def lead_to_dict(lead: Lead) -> dict:
         "adults_count": lead.adults_count,
         "format": lead.format,
         "extras": lead.extras or [],
+        "amocrm_deal_id": lead.amocrm_deal_id,
+        "amocrm_contact_id": lead.amocrm_contact_id,
     }
+
 
 
 def get_lead_by_id(lead_id: int) -> Optional[Lead]:

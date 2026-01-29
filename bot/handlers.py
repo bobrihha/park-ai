@@ -63,6 +63,32 @@ IMAGES = {
 }
 
 
+async def send_photo_or_text(bot, chat_id: int, image_key: str, caption: str, parse_mode: str = "HTML"):
+    """
+    Отправить фото с текстом. Если фото нет — отправить только текст.
+    """
+    image_path = IMAGES.get(image_key)
+    if image_path and os.path.exists(image_path):
+        try:
+            with open(image_path, 'rb') as photo_file:
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo_file,
+                    caption=caption,
+                    parse_mode=parse_mode
+                )
+                return
+        except Exception as e:
+            logger.warning(f"Failed to send image {image_key}: {e}")
+    
+    # Fallback: только текст
+    await bot.send_message(
+        chat_id=chat_id,
+        text=caption,
+        parse_mode=parse_mode
+    )
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start."""
     user = update.effective_user
@@ -595,13 +621,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Чтобы рассчитать и забронировать — ответьте:\n"
                 "📅 <b>На какую дату планируете праздник?</b>"
             )
-            with open(IMAGES["birthday"], 'rb') as photo_file:
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=photo_file,
-                    caption=caption,
-                    parse_mode="HTML"
-                )
+            await send_photo_or_text(context.bot, chat_id, "birthday", caption, "HTML")
 
         elif query.data == "intent_birthday":
             if session:
@@ -670,12 +690,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Если контакт не найден или нет телефона — стандартный флоу
             # Отправляем фото с текстом
             caption = BIRTHDAY_WELCOME_MESSAGE
-            with open(IMAGES["birthday"], 'rb') as photo_file:
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=photo_file,
-                    caption=caption
-                )
+            await send_photo_or_text(context.bot, chat_id, "birthday", caption)
         
         # Обработка выбора: изменить текущую заявку или создать новую
         elif query.data == "booking_modify":
@@ -985,12 +1000,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not lead_data.get("event_date"):
                 # Если даты ещё нет — начинаем с приветствия
                 caption = BIRTHDAY_WELCOME_MESSAGE
-                with open(IMAGES["birthday"], 'rb') as photo_file:
-                    await context.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=photo_file,
-                        caption=caption
-                    )
+                await send_photo_or_text(context.bot, chat_id, "birthday", caption)
             elif not lead_data.get("kids_count"):
                 date_obj = parse_user_date(lead_data["event_date"])
                 if date_obj:
@@ -1024,6 +1034,334 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=chat_id,
                 text="📱 Хорошо! Напишите, пожалуйста, ваш актуальный номер телефона для связи."
             )
+        
+        # ============ ОБРАБОТКА ВЫБОРА ФОРМАТА (format_room / format_zone) ============
+        elif query.data == "format_room":
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            
+            # Сохраняем выбранный формат
+            lead = get_or_create_lead(query.from_user.id)
+            update_lead_from_data(lead.id, {"format": "комната"})
+            
+            # Обновляем сессию
+            if session:
+                ld = session.lead_data or {}
+                ld["step"] = "time"
+                session.lead_data = ld
+                flag_modified(session, "lead_data")
+                db.commit()
+            
+            # Показываем слоты времени
+            keyboard = [
+                [InlineKeyboardButton("🕙 10:30", callback_data="time_1030")],
+                [InlineKeyboardButton("🕝 14:30", callback_data="time_1430")],
+                [InlineKeyboardButton("🕡 18:30", callback_data="time_1830")]
+            ]
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🏠 Отлично, выбрали тематическую комнату!\n\n⏰ Какой слот времени удобен?",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        
+        elif query.data == "format_zone":
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            
+            # Сохраняем выбранный формат
+            lead = get_or_create_lead(query.from_user.id)
+            update_lead_from_data(lead.id, {"format": "ресторан"})
+            mark_lead_sent_to_manager(lead.id)
+            
+            # Отправляем в AmoCRM
+            try:
+                lead_data_for_crm = lead_to_dict(lead)
+                result = await send_lead_to_amocrm(
+                    lead_data_for_crm,
+                    telegram_id=query.from_user.id,
+                    username=query.from_user.username
+                )
+                if result and result[0]:
+                    deal_id, contact_id = result
+                    save_amocrm_deal_id(lead.id, deal_id)
+                    if contact_id:
+                        save_amocrm_contact_id(lead.id, contact_id)
+            except Exception as e:
+                logger.error(f"Failed to send to AmoCRM: {e}")
+            
+            # Уведомляем менеджера
+            try:
+                msg = format_lead_message("telegram", str(query.from_user.id), lead_to_dict(lead), query.from_user.username)
+                await send_to_birthday_channel(msg)
+            except Exception as e:
+                logger.error(f"Failed to notify managers: {e}")
+            
+            # Показываем кнопки допуслуг (сразу, без слотов времени)
+            keyboard = [
+                [InlineKeyboardButton("🎂 Посмотреть торты", callback_data="view_cakes")],
+                [InlineKeyboardButton("🎭 Аниматоры и шоу", callback_data="view_animators")],
+                [InlineKeyboardButton("🎁 Пакеты под ключ", callback_data="view_packages")]
+            ]
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🍰 Записал столик в ресторане!\n\n"
+                     "Менеджер из отдела праздников скоро свяжется с вами 🧚\n\n"
+                     "А пока вы ждёте — у нас есть своя кондитерская! 🎂\n"
+                     "Можете выбрать торт к празднику или посмотреть другие услуги:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        
+        # ============ ОБРАБОТКА СЛОТОВ ВРЕМЕНИ ============
+        elif query.data in ("time_1030", "time_1430", "time_1830"):
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            
+            time_map = {"time_1030": "10:30", "time_1430": "14:30", "time_1830": "18:30"}
+            chosen_time = time_map[query.data]
+            
+            # Сохраняем время
+            lead = get_or_create_lead(query.from_user.id)
+            update_lead_from_data(lead.id, {"time": chosen_time})
+            mark_lead_sent_to_manager(lead.id)
+            
+            # Отправляем в AmoCRM
+            try:
+                lead_data_for_crm = lead_to_dict(lead)
+                result = await send_lead_to_amocrm(
+                    lead_data_for_crm,
+                    telegram_id=query.from_user.id,
+                    username=query.from_user.username
+                )
+                if result and result[0]:
+                    deal_id, contact_id = result
+                    save_amocrm_deal_id(lead.id, deal_id)
+                    if contact_id:
+                        save_amocrm_contact_id(lead.id, contact_id)
+            except Exception as e:
+                logger.error(f"Failed to send to AmoCRM: {e}")
+            
+            # Уведомляем менеджера
+            try:
+                msg = format_lead_message("telegram", str(query.from_user.id), lead_to_dict(lead), query.from_user.username)
+                await send_to_birthday_channel(msg)
+            except Exception as e:
+                logger.error(f"Failed to notify managers: {e}")
+            
+            # Показываем кнопки допуслуг (сразу, без подтверждения имени)
+            keyboard = [
+                [InlineKeyboardButton("🎂 Посмотреть торты", callback_data="view_cakes")],
+                [InlineKeyboardButton("🎭 Аниматоры и шоу", callback_data="view_animators")],
+                [InlineKeyboardButton("🎁 Пакеты под ключ", callback_data="view_packages")]
+            ]
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⏰ Записал на {chosen_time}!\n\n"
+                     f"Менеджер из отдела праздников скоро свяжется с вами 🧚\n\n"
+                     f"А пока вы ждёте — у нас есть своя кондитерская! 🎂\n"
+                     f"Можете выбрать торт к празднику или посмотреть другие услуги:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        
+        # ============ ПОДТВЕРЖДЕНИЕ ИМЕНИ ============
+        elif query.data == "name_confirm_yes":
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            
+            # Сохраняем имя из профиля
+            user_name = query.from_user.first_name or "Клиент"
+            lead = get_or_create_lead(query.from_user.id)
+            update_lead_from_data(lead.id, {"customer_name": user_name})
+            
+            # Обновляем сессию
+            if session:
+                ld = session.lead_data or {}
+                ld["step"] = "done"
+                session.lead_data = ld
+                flag_modified(session, "lead_data")
+                db.commit()
+            
+            # Получаем данные для итога
+            lead_data_final = lead_to_dict(lead)
+            
+            # Отправляем в AmoCRM
+            try:
+                result = await send_lead_to_amocrm(
+                    lead_data_final, 
+                    telegram_id=query.from_user.id,
+                    username=query.from_user.username
+                )
+                if result and result[0]:
+                    deal_id, contact_id = result
+                    save_amocrm_deal_id(lead.id, deal_id)
+                    if contact_id:
+                        save_amocrm_contact_id(lead.id, contact_id)
+            except Exception as e:
+                logger.error(f"Failed to send to AmoCRM: {e}")
+            
+            # Уведомляем менеджера
+            try:
+                msg = format_lead_message("telegram", str(query.from_user.id), lead_data_final, query.from_user.username)
+                await send_to_birthday_channel(msg)
+                mark_lead_sent_to_manager(lead.id)
+            except Exception as e:
+                logger.error(f"Failed to notify managers: {e}")
+            
+            # Показываем итог + допуслуги
+            keyboard = [
+                [InlineKeyboardButton("🎂 Каталог тортов", callback_data="view_cakes")],
+                [InlineKeyboardButton("🎭 Аниматоры", callback_data="view_animators")]
+            ]
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ Заявка принята! Менеджер скоро свяжется.\n\n"
+                     f"📋 Ваша бронь:\n"
+                     f"- Дата: {lead_data_final.get('event_date', '—')}\n"
+                     f"- Детей: {lead_data_final.get('kids_count', '—')}\n"
+                     f"- Формат: {lead_data_final.get('format', '—')}\n"
+                     f"- Время: {lead_data_final.get('time', '—')}\n"
+                     f"- Имя: {user_name}\n\n"
+                     f"💡 Пока ждёте звонка:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        
+        elif query.data == "name_confirm_no":
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            
+            # Обновляем сессию
+            if session:
+                ld = session.lead_data or {}
+                ld["step"] = "name_input"
+                session.lead_data = ld
+                flag_modified(session, "lead_data")
+                db.commit()
+            
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="✏️ Напишите, пожалуйста, ваше имя:"
+            )
+        
+        # ============ ПОДТВЕРЖДЕНИЕ ТЕЛЕФОНА ============
+        elif query.data == "phone_confirm_yes":
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            
+            # Получаем pending телефон из сессии
+            pending_phone = None
+            if session:
+                ld = session.lead_data or {}
+                pending_phone = ld.get("pending_phone")
+            
+            if pending_phone:
+                lead = get_or_create_lead(query.from_user.id)
+                update_lead_from_data(lead.id, {"phone": pending_phone})
+                
+                # Обновляем сессию
+                if session:
+                    ld = session.lead_data or {}
+                    ld["step"] = "format"
+                    ld["phone_confirmed"] = True
+                    session.lead_data = ld
+                    flag_modified(session, "lead_data")
+                    db.commit()
+                
+                # Отправляем в AmoCRM
+                lead_data_for_crm = lead_to_dict(lead)
+                try:
+                    result = await send_lead_to_amocrm(
+                        lead_data_for_crm, 
+                        telegram_id=query.from_user.id,
+                        username=query.from_user.username
+                    )
+                    if result and result[0]:
+                        save_amocrm_deal_id(lead.id, result[0])
+                        if result[1]:
+                            save_amocrm_contact_id(lead.id, result[1])
+                except Exception as e:
+                    logger.error(f"Failed to send to AmoCRM: {e}")
+                
+                # Показываем выбор формата
+                event_date_str = lead_data_for_crm.get("event_date", "")
+                kids_count = lead_data_for_crm.get("kids_count", 0)
+                
+                from core.utils import calculate_birthday_price
+                event_date = parse_user_date(event_date_str)
+                
+                price_text = ""
+                if event_date and kids_count:
+                    room_calc = calculate_birthday_price(event_date, kids_count, "room", "nn")
+                    zone_calc = calculate_birthday_price(event_date, kids_count, "zone", "nn")
+                    price_text = (
+                        f"🏠 Тематическая комната — 3 часа\n"
+                        f"Для {kids_count} детей: {room_calc['description']}\n\n"
+                        f"🍰 Столик в ресторане — без ограничений\n"
+                        f"Для {kids_count} детей: {zone_calc['description']}\n\n"
+                    )
+                
+                keyboard = [
+                    [InlineKeyboardButton("🏠 Комната", callback_data="format_room")],
+                    [InlineKeyboardButton("🍰 Ресторан", callback_data="format_zone")]
+                ]
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"📞 Отлично, записал!\n\nДавайте выберем формат праздника! 💚\n\n{price_text}Какой формат вам ближе?",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+        
+        elif query.data == "phone_confirm_no":
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            
+            # Обновляем сессию
+            if session:
+                ld = session.lead_data or {}
+                ld["step"] = "phone_input"
+                session.lead_data = ld
+                flag_modified(session, "lead_data")
+                db.commit()
+            
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="📱 Напишите, пожалуйста, ваш номер телефона для связи:"
+            )
+        
+        # ============ ПРОСМОТР КАТАЛОГОВ ============
+        elif query.data == "view_cakes":
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🎂 <b>Каталог тортов:</b>\n\n"
+                     "👉 <a href='https://catalog.botcicada.ru/cakes.html'>Открыть каталог</a>\n\n"
+                     "Закажите торт заранее — доставим прямо к празднику! 🍰",
+                parse_mode="HTML"
+            )
+        
+        elif query.data == "view_animators":
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🎭 <b>Аниматоры и программы:</b>\n\n"
+                     "👉 <a href='https://catalog.botcicada.ru/animators.html'>Смотреть программы</a>\n\n"
+                     "Наши аниматоры сделают праздник незабываемым! 🎉",
+                parse_mode="HTML"
+            )
+        # ============ КОНЕЦ ОБРАБОТКИ ФОРМАТА ============
+        
+        
         elif query.data == "intent_general":
             if session:
                 session.intent = "general"
@@ -1045,12 +1383,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• Как добраться\n\n"
                 "Я с удовольствием помогу! 😊"
             )
-            with open(IMAGES["general"], 'rb') as photo_file:
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=photo_file,
-                    caption=caption
-                )
+            await send_photo_or_text(context.bot, chat_id, "general", caption)
             
         elif query.data == "intent_events":
             if session:
@@ -1069,12 +1402,160 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Следите за нашими событиями:\n"
                 "👉 nn.jucity.ru/afisha/"
             )
-            with open(IMAGES["events"], 'rb') as photo_file:
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=photo_file,
-                    caption=caption
-                )
+            await send_photo_or_text(context.bot, chat_id, "events", caption)
+        
+        elif query.data == "format_room":
+            # Пользователь выбрал комнату → предлагаем слоты времени
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            
+            # Сохраняем формат
+            lead = db.query(Lead).filter(
+                Lead.telegram_id == str(query.from_user.id),
+                Lead.park_id == "nn",
+                Lead.status.in_(["new", "contacted"])
+            ).order_by(Lead.created_at.desc()).first()
+            
+            if lead:
+                update_lead_from_data(lead.id, {"format": "room"})
+            
+            # Предлагаем выбрать время
+            keyboard = [
+                [InlineKeyboardButton("🕥 10:30", callback_data="time_10_30")],
+                [InlineKeyboardButton("🕝 14:30", callback_data="time_14_30")],
+                [InlineKeyboardButton("🕡 18:30", callback_data="time_18_30")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🏠 Отлично, тематическая комната!\n\n"
+                     "🕐 Выберите удобное время начала праздника:",
+                reply_markup=reply_markup
+            )
+        
+        elif query.data == "format_zone":
+            # Пользователь выбрал ресторан → пропускаем слоты, сразу предлагаем услуги
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            
+            # Сохраняем формат
+            lead = db.query(Lead).filter(
+                Lead.telegram_id == str(query.from_user.id),
+                Lead.park_id == "nn",
+                Lead.status.in_(["new", "contacted"])
+            ).order_by(Lead.created_at.desc()).first()
+            
+            if lead:
+                update_lead_from_data(lead.id, {"format": "zone"})
+            
+            # Предлагаем услуги
+            keyboard = [
+                [InlineKeyboardButton("🎂 Посмотреть торты", callback_data="show_cakes")],
+                [InlineKeyboardButton("🎭 Аниматоры и шоу", callback_data="show_animators")],
+                [InlineKeyboardButton("🎁 Пакеты под ключ", callback_data="show_packages")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🍰 Отлично, столик в ресторане!\n\n"
+                     "Менеджер из отдела праздников скоро свяжется с вами 📞\n\n"
+                     "А пока вы ждёте — у нас есть кондитерская! 🎂\n"
+                     "Можете выбрать торт к празднику или посмотреть другие услуги:",
+                reply_markup=reply_markup
+            )
+        
+        elif query.data.startswith("time_"):
+            # Пользователь выбрал время → сохраняем и предлагаем услуги
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            
+            # Парсим время
+            time_map = {
+                "time_10_30": "10:30",
+                "time_14_30": "14:30",
+                "time_18_30": "18:30"
+            }
+            selected_time = time_map.get(query.data, "")
+            
+            # Сохраняем время
+            lead = db.query(Lead).filter(
+                Lead.telegram_id == str(query.from_user.id),
+                Lead.park_id == "nn",
+                Lead.status.in_(["new", "contacted"])
+            ).order_by(Lead.created_at.desc()).first()
+            
+            if lead:
+                update_lead_from_data(lead.id, {"event_time": selected_time})
+            
+            # Предлагаем услуги
+            keyboard = [
+                [InlineKeyboardButton("🎂 Посмотреть торты", callback_data="show_cakes")],
+                [InlineKeyboardButton("🎭 Аниматоры и шоу", callback_data="show_animators")],
+                [InlineKeyboardButton("🎁 Пакеты под ключ", callback_data="show_packages")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⏰ Записал на {selected_time}!\n\n"
+                     "Менеджер из отдела праздников скоро свяжется с вами 📞\n\n"
+                     "А пока вы ждёте — у нас есть своя кондитерская! 🎂\n"
+                     "Можете выбрать торт к празднику или посмотреть другие услуги:",
+                reply_markup=reply_markup
+            )
+        
+        elif query.data == "show_cakes":
+            # Показываем каталог тортов
+            await query.answer()
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🎂 <b>Наша кондитерская!</b>\n\n"
+                     "У нас есть торты на любой вкус — от классических до тематических с персонажами!\n\n"
+                     "📱 Посмотреть каталог: https://catalog.botcicada.ru/menu.html\n\n"
+                     "Также можно принести свой торт (сбор 1000₽ за вынос торта).\n\n"
+                     "Если нужна помощь с выбором — пишите, подскажу! 😊",
+                parse_mode="HTML"
+            )
+        
+        elif query.data == "show_animators":
+            # Показываем информацию об аниматорах
+            await query.answer()
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🎭 <b>Аниматоры и шоу!</b>\n\n"
+                     "У нас есть:\n"
+                     "• Тематические программы с персонажами\n"
+                     "• Квесты и приключения\n"
+                     "• Научные шоу\n"
+                     "• Мастер-классы\n"
+                     "• Аквагрим\n\n"
+                     "📱 Каталог программ: https://catalog.botcicada.ru/animation.html\n\n"
+                     "Менеджер поможет подобрать идеальную программу под возраст и интересы! 🎉",
+                parse_mode="HTML"
+            )
+        
+        elif query.data == "show_packages":
+            # Показываем пакеты
+            await query.answer()
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🎁 <b>Пакеты праздников под ключ!</b>\n\n"
+                     "Готовые решения, чтобы вам не думать о деталях:\n\n"
+                     "🌟 <b>Круто</b> — базовый комплект с аниматором\n"
+                     "⭐ <b>Супер</b> — расширенный с шоу-программой\n"
+                     "🔥 <b>WOW</b> — максимальный с VIP-обслуживанием\n\n"
+                     "📱 Подробнее: https://catalog.botcicada.ru/packages.html\n\n"
+                     "Или расскажите мне что хотите — и я помогу выбрать! 😊",
+                parse_mode="HTML"
+            )
         
         elif query.data == "my_booking":
             # Кнопка "Моё бронирование" из стартового меню
@@ -1253,6 +1734,53 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await query.message.reply_text("📱 Укажите номер телефона для связи:")
 
+        elif query.data == "lost_confirm_yes":
+            # Подтвердил что потерял вещь — начинаем опрос
+            lost_data = {"lost_step": "date"}
+            session.intent = "lost_item"
+            session.lead_data = lost_data
+            flag_modified(session, "lead_data")
+            db.commit()
+            
+            await query.message.reply_text(
+                "Ой, как жаль! 😔 Давайте попробуем найти вашу вещь.\n\n"
+                "📅 Когда вы были в парке? (напишите дату)"
+            )
+
+        elif query.data == "lost_confirm_no":
+            # Не потерял — сбрасываем режим и обрабатываем исходное сообщение
+            original_message = (session.lead_data or {}).get("original_message", "")
+            
+            session.intent = "unknown"
+            session.lead_data = {}
+            db.commit()
+            
+            if original_message:
+                # Обрабатываем исходное сообщение через AI
+                from core.message_service import get_message_service, UserInfo, Platform
+                
+                user = query.from_user
+                user_info = UserInfo(
+                    user_id=str(user.id),
+                    platform=Platform.TELEGRAM,
+                    username=user.username,
+                    first_name=user.first_name
+                )
+                
+                service = get_message_service("nn")
+                result = await service.process_message(user_info, original_message)
+                
+                await query.message.reply_text(
+                    result.text,
+                    parse_mode="HTML"
+                )
+            else:
+                await query.message.reply_text(
+                    "Понял! 😊 Тогда чем могу помочь?\n\n"
+                    "Спрашивайте о парке, ценах или празднике! 💚"
+                )
+
+
         elif query.data == "photo_phone_yes":
             # Подтвердил телефон — создаём заявку на фотосессию
             photo_data = session.lead_data or {}
@@ -1310,1364 +1838,130 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await query.message.reply_text("📱 Укажите номер телефона для связи:")
 
+        # ============ ПРОСМОТР КАТАЛОГОВ ДР ============
+        elif query.data == "view_cakes":
+            await query.message.reply_text(
+                "🎂 Наша кондитерская!\n\n"
+                "У нас есть торты на любой вкус — от классических до тематических с персонажами!\n\n"
+                "📱 Посмотреть каталог: https://catalog.botcicada.ru/menu.html\n\n"
+                "Также можно принести свой торт (сбор 1000₽ за вынос торта).\n\n"
+                "Если нужна помощь с выбором — пишите, подскажу! 😊"
+            )
+
+        elif query.data == "view_animators":
+            await query.message.reply_text(
+                "🎭 Аниматоры и шоу!\n\n"
+                "У нас есть:\n"
+                "• Тематические программы с персонажами\n"
+                "• Квесты и приключения\n"
+                "• Научные шоу\n"
+                "• Мастер-классы\n"
+                "• Аквагрим\n\n"
+                "📱 Каталог программ: https://catalog.botcicada.ru/animation.html\n\n"
+                "Менеджер поможет подобрать идеальную программу под возраст и интересы! 🎉"
+            )
+
+        elif query.data == "view_packages":
+            await query.message.reply_text(
+                "🎁 Пакеты праздников!\n\n"
+                "🌴 «Джунгли зовут» (5 детей) — от 9 660₽\n"
+                "Билеты + поздравление от Джуси + угощения\n\n"
+                "🦁 «Большое сафари» (7 детей) — от 16 050₽\n"
+                "Билеты + анимация 60 мин + угощения\n\n"
+                "🌴 «Тропический переполох» (10 детей) — от 25 850₽\n"
+                "Билеты + анимация + мини-шоу + шары + угощения\n\n"
+                "📱 Подробнее: https://catalog.botcicada.ru/packages.html\n\n"
+                "Расскажите что хотите — и я помогу выбрать! 😊"
+            )
+
     finally:
+
         db.close()
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик текстовых сообщений."""
+    """
+    Обработчик текстовых сообщений.
+    
+    Использует MessageService для унифицированной обработки.
+    Вся бизнес-логика теперь в core/message_service.py и core/flows/.
+    """
+    from core.message_service import get_message_service, UserInfo, Platform
+    from core.notifications import send_to_managers, send_to_birthday_channel
+    
     user = update.effective_user
     message_text = update.message.text
-    user_id = str(user.id)
     
-    logger.info(f"Message from {user.first_name} ({user_id}): {message_text}")
+    logger.info(f"Message from {user.first_name} ({user.id}): {message_text}")
     
-    db = SessionLocal()
+    # Создаём UserInfo
+    user_info = UserInfo(
+        user_id=str(user.id),
+        platform=Platform.TELEGRAM,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name
+    )
+    
     try:
-        # Получаем или создаём сессию
-        session = db.query(DBSession).filter(DBSession.telegram_id == user_id).first()
-        if not session:
-            session = DBSession(telegram_id=user_id, park_id="nn", username=user.username)
-            db.add(session)
-            db.commit()
-            db.refresh(session)
-        else:
-            # Обновляем username если изменился
-            if user.username and session.username != user.username:
-                session.username = user.username
-                db.commit()
+        # Получаем MessageService
+        service = get_message_service("nn")
         
-        # Сохраняем сообщение пользователя
-        user_message = Message(session_id=session.id, role="user", content=message_text)
-        db.add(user_message)
-        db.commit()
+        # Обрабатываем сообщение через унифицированный сервис
+        result = await service.process_message(user_info, message_text)
         
-        # Получаем lead_data из сессии
-        lead_data = session.lead_data or {}
-        verified_name = None  # Персонализация отключена
-
-        # --- НОВАЯ ЛОГИКА: Проверка на ID приложения ---
-        # Ищем только если есть явное упоминание "id", "код" и НЕТ признаков телефона
-        app_id_match = None
-        
-        # Исключаем очевидные телефонные паттерны
-        # Телефоны: +7, 7, 8, 9 + 10-11 цифр всего, или содержат +, (), -
-        is_phone_pattern = bool(re.search(r'[\+\(\)]', message_text))
-        is_phone_pattern = is_phone_pattern or bool(re.search(r'\d{1,3}\-\d{1,3}\-\d{1,3}', message_text))
-        # Также проверим: число 10-11 цифр, начинающееся с 7, 8, 9 — это телефон
-        phone_like_number = re.search(r'\b([789]\d{9,10})\b', message_text)
-        
-        if not is_phone_pattern:
-            # Ключевые слова для ID
-            id_keywords = r'(?:app\s*id|мой\s*id|айди|ид\b|код|подписал\w*|подписка)'
-            
-            # Сначала ищем ID с ключевым словом
-            app_id_match = re.search(
-                id_keywords + r'\s*[,:.=\-]?\s*(\d{5,8})\b', 
-                message_text, re.IGNORECASE
-            )
-            
-            # Если с ключевым словом нашли число, похожее на телефон — отклоняем
-            if app_id_match and phone_like_number:
-                if app_id_match.group(1) == phone_like_number.group(1):
-                    app_id_match = None
-            
-            # Если не нашли с ключевым словом — ищем "голое" 5-8 значное число
-            if not app_id_match:
-                clean_text = message_text.strip()
-                # Только короткое сообщение, и число НЕ начинается с 7, 8, 9 (чтобы не путать с телефоном)
-                if len(clean_text) <= 12:
-                    bare_id_match = re.match(r'^(\d{5,8})$', clean_text)
-                    if bare_id_match:
-                        potential_id = bare_id_match.group(1)
-                        # Если начинается с 7, 8, 9 и 10+ цифр — это телефон
-                        if not (potential_id[0] in '789' and len(potential_id) >= 10):
-                            app_id_match = bare_id_match
-        
-        if app_id_match:
-            app_id = app_id_match.group(1)
-            
-            # Отправляем уведомление менеджерам
-            try:
-                msg_text = (
-                    f"🔔 <b>Новый App ID!</b>\n\n"
-                    f"👤 Пользователь: {user.first_name or 'Неизвестный'} (@{user.username or 'нет username'})\n"
-                    f"🔢 ID: <code>{app_id}</code>\n"
-                    f"💬 Сообщение: {message_text}"
-                )
-                await send_to_managers(msg_text)
-                logger.info(f"App ID {app_id} notification sent to manager")
-            except Exception as e:
-                logger.error(f"Failed to notify manager about App ID: {e}")
-            
-            # Отвечаем пользователю
-            await update.message.reply_text(
-                "Принято! Передал менеджеру для начисления баллов. "
-                "Баллы будут начислены в течение 7 дней. "
-                "Спасибо, что вы с нами! 💚💜"
-            )
-            return
-        # -----------------------------------------------
-        
-        # ============ ЖАЛОБЫ — обработка жалоб на обслуживание ============
-        # Проверяем, находимся ли мы уже в режиме опроса жалобы
-        complaint_data = session.lead_data or {}
-        complaint_step = complaint_data.get("complaint_step")
-        
-        if complaint_step:
-            # Мы в процессе сбора телефона для жалобы
-            if complaint_step == "phone":
-                # Валидируем телефон
-                phone_pattern = r'[\d\+\(\)\-\s]{7,}'
-                if re.search(phone_pattern, message_text):
-                    complaint_data["phone"] = message_text
-                    
-                    # Отправляем уведомление менеджерам
-                    msg = format_complaint_message(
-                        platform="telegram",
-                        user_id=user_id,
-                        user_name=user.first_name or "Гость",
-                        complaint_text=complaint_data.get("complaint_text", ""),
-                        phone=message_text,
-                        username=user.username
+        # Строим клавиатуру если есть кнопки
+        reply_markup = None
+        if result.buttons:
+            keyboard = []
+            for btn in result.buttons:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        text=btn.get("text", ""),
+                        callback_data=btn.get("callback", "")
                     )
-                    await send_to_managers(msg)
-                    
-                    # Сбрасываем режим
-                    session.intent = "unknown"
-                    session.lead_data = {}
-                    db.commit()
-                    
-                    await update.message.reply_text(
-                        "🙏 Спасибо, что сообщили нам об этом!\n\n"
-                        "Информация передана руководству парка. "
-                        "Мы обязательно разберёмся в ситуации и свяжемся с вами "
-                        "в ближайшее время для решения вопроса.\n\n"
-                        "Приносим извинения за доставленные неудобства. 💚"
-                    )
-                    return
-                else:
-                    await update.message.reply_text("📱 Пожалуйста, укажите корректный номер телефона:")
-                    return
+                ])
+            reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Проверяем триггер жалобы (ВАЖНО: проверяем ДО потерянных вещей!)
-        if needs_complaint_flow(message_text):
-            # Проверяем, есть ли телефон в CRM
-            phone = None
+        # Отправляем ответ
+        if result.image_path and os.path.exists(result.image_path):
             try:
-                contact = await amocrm_client.find_contact_by_telegram_id(user.id)
-                if contact:
-                    contact_info = amocrm_client.get_contact_info(contact)
-                    phone = contact_info.get("phone")
-            except Exception as e:
-                logger.error(f"Error finding contact for complaint: {e}")
-            
-            if phone:
-                # Телефон уже есть — сразу отправляем жалобу
-                msg = format_complaint_message(
-                    platform="telegram",
-                    user_id=user_id,
-                    user_name=user.first_name or "Гость",
-                    complaint_text=message_text,
-                    phone=phone,
-                    username=user.username
-                )
-                await send_to_managers(msg)
-                
-                await update.message.reply_text(
-                    "😔 Нам очень жаль, что у вас остались негативные впечатления.\n\n"
-                    "Информация передана руководству парка. "
-                    "Мы обязательно разберёмся в ситуации и свяжемся с вами "
-                    "в ближайшее время для решения вопроса.\n\n"
-                    "Приносим извинения за доставленные неудобства. 💚"
-                )
-                return
-            else:
-                # Телефона нет — запрашиваем
-                session.intent = "complaint"
-                session.lead_data = {
-                    "complaint_step": "phone",
-                    "complaint_text": message_text  # Сохраняем текст жалобы
-                }
-                flag_modified(session, "lead_data")
-                db.commit()
-                
-                await update.message.reply_text(
-                    "😔 Нам очень жаль, что у вас остались негативные впечатления.\n\n"
-                    "Мы обязательно разберёмся в ситуации!\n\n"
-                    "📱 Пожалуйста, оставьте ваш номер телефона — "
-                    "руководство парка свяжется с вами для решения вопроса."
-                )
-                return
-        # ============ КОНЕЦ ЖАЛОБЫ ============
-        
-        # ============ ПОТЕРЯШКИ — обработка потерянных вещей ============
-        # Проверяем, находимся ли мы уже в режиме опроса
-        lost_data = session.lead_data or {}
-        lost_step = lost_data.get("lost_step")
-        
-        if lost_step:
-            # Проверяем, не хочет ли пользователь выйти из опроса
-            exit_keywords = [
-                "ничего не потерял", "ничего не потеряла", "ничего не теряла", "ничего не терял",
-                "не потерял", "не потеряла", "не теряла", "не терял",
-                "я не про это", "я о другом", "хотел спросить", "хотела спросить",
-                "я спрашиваю", "речь не об этом", "не об этом",
-                "отмена", "стоп", "хватит", "выход", "exit", "cancel",
-                "можно купить", "где купить", "продаёте", "продаете",
-            ]
-            message_lower = message_text.lower()
-            if any(kw in message_lower for kw in exit_keywords):
-                # Сбрасываем режим потеряшек
-                session.intent = "unknown"
-                session.lead_data = {}
-                db.commit()
-                
-                await update.message.reply_text(
-                    "Ой, простите за недопонимание! 😊\n\n"
-                    "Чем могу помочь? Спрашивайте — я отвечу на любые вопросы о парке, ценах или празднике! 💚"
-                )
-                return
-            
-            # Мы в процессе опроса о потерянной вещи
-            user_name = user.first_name or "Гость"
-            
-            if lost_step == "date":
-                lost_data["lost_date"] = message_text
-                lost_data["lost_step"] = "location"
-                session.lead_data = lost_data
-                flag_modified(session, "lead_data")
-                db.commit()
-                await update.message.reply_text("📍 В каком примерно месте вы могли оставить вещь?\n(аттракцион, комната, ресторан и т.д.)")
-                return
-                
-            elif lost_step == "location":
-                lost_data["lost_location"] = message_text
-                lost_data["lost_step"] = "description"
-                session.lead_data = lost_data
-                flag_modified(session, "lead_data")
-                db.commit()
-                await update.message.reply_text("🔍 Опишите, что именно потеряли?\n(цвет, размер, особенности)")
-                return
-                
-            elif lost_step == "description":
-                lost_data["lost_description"] = message_text
-                lost_data["lost_step"] = "phone"
-                session.lead_data = lost_data
-                flag_modified(session, "lead_data")
-                db.commit()
-                
-                # Проверяем телефон в CRM
-                try:
-                    contact = await amocrm_client.find_contact_by_telegram_id(user.id)
-                    if contact:
-                        contact_info = amocrm_client.get_contact_info(contact)
-                        phone = contact_info.get("phone")
-                        if phone:
-                            lost_data["phone"] = phone
-                            lost_data["lost_step"] = "confirm_phone"
-                            session.lead_data = lost_data
-                            flag_modified(session, "lead_data")
-                            db.commit()
-                            
-                            keyboard = [
-                                [InlineKeyboardButton("✅ Да", callback_data="lost_phone_yes"),
-                                 InlineKeyboardButton("❌ Другой", callback_data="lost_phone_no")]
-                            ]
-                            await update.message.reply_text(
-                                f"📱 Для связи использовать номер {phone}?",
-                                reply_markup=InlineKeyboardMarkup(keyboard)
-                            )
-                            return
-                except Exception as e:
-                    logger.error(f"Failed to check CRM for lost item: {e}")
-                
-                # Нет телефона — запрашиваем
-                await update.message.reply_text("📱 Укажите номер телефона для связи:")
-                return
-                
-            elif lost_step == "phone":
-                lost_data["phone"] = message_text
-                
-                # Отправляем уведомление
-                msg = format_lost_item_message(
-                    platform="telegram",
-                    user_id=user_id,
-                    user_name=user_name,
-                    lost_date=lost_data.get("lost_date"),
-                    lost_location=lost_data.get("lost_location"),
-                    lost_description=lost_data.get("lost_description"),
-                    phone=lost_data.get("phone"),
-                    username=user.username
-                )
-                await send_to_managers(msg)
-                
-                # Сбрасываем режим
-                session.intent = "unknown"
-                session.lead_data = {}
-                db.commit()
-                
-                await update.message.reply_text(
-                    "✅ Спасибо! Мы передали информацию в бюро находок.\n\n"
-                    "Менеджер свяжется с вами, если вещь найдётся. 💚"
-                )
-                return
-        
-        # Проверяем триггер потеряшек (начало опроса)
-        # Если уже был в режиме lost_item но lost_step нет — сбросим и начнём заново
-        if session.intent == "lost_item" and not lost_step:
-            session.intent = "unknown"
-            db.commit()
-        
-        if needs_lost_item_flow(message_text):
-            session.intent = "lost_item"
-            session.lead_data = {"lost_step": "date"}
-            flag_modified(session, "lead_data")
-            db.commit()
-            
-            await update.message.reply_text(
-                "Ой, как жаль! 😔 Давайте попробуем найти вашу вещь.\n\n"
-                "📅 Когда вы были в парке? (напишите дату)"
-            )
-            return
-        # ============ КОНЕЦ ПОТЕРЯШКИ ============
-        
-        # ============ АВТОПОКАЗ БРОНИРОВАНИЯ ============
-        # Если пользователь спрашивает про своё бронирование — показываем
-        booking_keywords = [
-            "моя бронь", "моё бронь", "мое бронь", "мои брони",
-            "моя заявка", "моё заявка", "мое заявка", "мои заявки",
-            "моё бронирование", "мое бронирование", "мои бронирования",
-            "статус заявки", "статус брони", "статус бронирования",
-            "мой праздник", "моё праздник", "мое праздник",
-            "что с заявкой", "что с бронью", "что с бронированием",
-            "где моя заявка", "где моя бронь",
-            "проверить бронь", "посмотреть бронь", "узнать статус"
-        ]
-        message_lower = message_text.lower()
-        if any(kw in message_lower for kw in booking_keywords):
-            # Вызываем функционал /booking
-            leads = db.query(Lead).filter(
-                Lead.telegram_id == user_id,
-                Lead.status.in_(["new", "contacted", "booked"]),
-                Lead.sent_to_manager == True
-            ).order_by(Lead.created_at.desc()).limit(3).all()
-            
-            if leads:
-                for lead in leads:
-                    text = format_booking_info(lead)
-                    keyboard = [
-                        [InlineKeyboardButton("✏️ Изменить дату/время", callback_data=f"change_{lead.id}_datetime")],
-                        [InlineKeyboardButton("👥 Изменить кол-во гостей", callback_data=f"change_{lead.id}_guests")],
-                        [InlineKeyboardButton("🎁 Добавить услуги", callback_data=f"change_{lead.id}_extras")],
-                        [InlineKeyboardButton("❌ Отменить бронь", callback_data=f"change_{lead.id}_cancel")]
-                    ]
-                    await update.message.reply_text(
-                        text,
-                        reply_markup=InlineKeyboardMarkup(keyboard),
+                with open(result.image_path, 'rb') as photo:
+                    await update.message.reply_photo(
+                        photo=photo,
+                        caption=result.text,
+                        reply_markup=reply_markup,
                         parse_mode="HTML"
                     )
-                return
-            else:
-                await update.message.reply_text(
-                    "📋 У вас пока нет активных бронирований.\n\n"
-                    "Хотите забронировать праздник? Напишите /birthday 🎉"
-                )
-                return
-        # ============ КОНЕЦ АВТОПОКАЗА ============
-        
-        # Проверяем запрос живого менеджера
-        if needs_human_escalation(message_text):
-            # Отправляем уведомление менеджерам
-            escalation_msg = format_escalation_message(
-                platform="telegram",
-                user_id=user_id,
-                username=user.username,
-                user_name=user.first_name or "Неизвестный",
-                message=message_text
-            )
-            await send_to_managers(escalation_msg)
-            
-            # Отвечаем пользователю
-            await update.message.reply_text(
-                "Понимаю, что вам нужна помощь живого менеджера! 🙋\n\n"
-                "Я уже передал ваш запрос нашей команде. "
-                "Менеджер свяжется с вами в ближайшее время!\n\n"
-                "А пока я могу ответить на ваши вопросы о парке или празднике. 😊"
-            )
-            return
-        
-        # ============ ЗАПРОСЫ НА ИЗМЕНЕНИЕ БРОНИРОВАНИЯ ============
-        # Проверяем, просит ли клиент изменить/отменить бронь текстом
-        if needs_booking_change_request(message_text):
-            user_name = user.first_name or "Гость"
-            change_type = get_booking_change_type(message_text)
-            
-            # Ищем сделку пользователя в AmoCRM
-            deal_id = None
-            phone = None
-            try:
-                contact = await amocrm_client.find_contact_by_telegram_id(user.id)
-                if contact:
-                    contact_info = amocrm_client.get_contact_info(contact)
-                    phone = contact_info.get("phone")
-                    
-                    # Получаем последнюю сделку
-                    deals = await amocrm_client.get_contact_deals(contact["id"])
-                    if deals:
-                        deal_id = str(deals[0].get("id", ""))
-                        
-                        # Создаём задачу в AmoCRM
-                        task_text = f"Клиент просит: {change_type} (из Telegram)"
-                        await amocrm_client.create_task(int(deal_id), task_text)
             except Exception as e:
-                logger.error(f"Error checking AmoCRM for booking change: {e}")
-            
-            # Отправляем уведомление менеджерам
-            msg = format_booking_change_message(
-                platform="telegram",
-                user_id=user_id,
-                user_name=user_name,
-                change_type=change_type,
-                message_text=message_text,
-                deal_id=deal_id,
-                phone=phone,
-                username=user.username
-            )
-            await send_to_birthday_channel(msg)
-            
-            # Отвечаем пользователю
-            await update.message.reply_text(
-                f"✅ Ваш запрос на «{change_type}» передан менеджеру!\n\n"
-                "Мы свяжемся с вами в ближайшее время для уточнения деталей. 📞"
-            )
-            return
-        # ============ КОНЕЦ ЗАПРОСОВ НА ИЗМЕНЕНИЕ ============
-        
-        # ============ ОБРАБОТКА ЗАПРОСОВ ФОТОГРАФИЙ ============
-        # Проверяем, уже в режиме опроса про фото?
-        photo_data = session.lead_data or {}
-        photo_step = photo_data.get("photo_step")
-        
-        if photo_step:
-            user_name = user.first_name or "Гость"
-            
-            if photo_step == "date":
-                # Сохраняем дату и переходим к телефону
-                photo_data["photo_date"] = message_text
-                
-                # Проверяем, есть ли уже телефон
-                if photo_data.get("phone"):
-                    # Телефон уже есть — подтверждаем
-                    phone = photo_data["phone"]
-                    photo_data["photo_step"] = "confirm_phone"
-                    session.lead_data = photo_data
-                    flag_modified(session, "lead_data")
-                    db.commit()
-                    
-                    keyboard = [
-                        [InlineKeyboardButton("✅ Да, верно", callback_data="photo_phone_yes")],
-                        [InlineKeyboardButton("📱 Другой номер", callback_data="photo_phone_no")]
-                    ]
-                    await update.message.reply_text(
-                        f"📱 Для связи использовать номер {phone}?",
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-                else:
-                    # Телефона нет — спрашиваем
-                    photo_data["photo_step"] = "phone"
-                    session.lead_data = photo_data
-                    flag_modified(session, "lead_data")
-                    db.commit()
-                    
-                    await update.message.reply_text("📱 Укажите номер телефона для связи:")
-                return
-            
-            elif photo_step == "phone":
-                # Валидируем телефон
-                phone_pattern = r'[\d\+\(\)\-\s]{7,}'
-                if re.search(phone_pattern, message_text):
-                    photo_data["phone"] = message_text
-                    photo_type = photo_data.get("type", "request")
-                    
-                    if photo_type in ["order", "standalone"]:
-                        # Заказ фотографа — создаём заявку
-                        photo_date = photo_data.get("photo_date", "Не указана")
-                        
-                        msg = format_photo_order_message(
-                            platform="telegram",
-                            user_id=user_id,
-                            user_name=user_name,
-                            phone=message_text,
-                            username=user.username
-                        )
-                        # Добавляем дату в сообщение для менеджеров
-                        msg = msg.replace("</b>\n\n", f"</b>\n\n📅 <b>Дата:</b> {photo_date}\n\n", 1)
-                        await send_to_managers(msg)
-                        
-                        # Создаём лид и отправляем в AmoCRM
-                        try:
-                            lead = get_or_create_lead(user_id, source="telegram", park_id="nn")
-                            lead.phone = message_text
-                            lead.name = user_name
-                            lead.extras = "Фотограф (2500₽/час)"
-                            db.commit()
-                            
-                            # Отправляем в AmoCRM
-                            await send_lead_to_amocrm(
-                                lead_data={
-                                    "customer_name": user_name,
-                                    "phone": message_text,
-                                    "event_date": photo_date,
-                                    "extras": "📸 Заказ фотографа (2500₽/час)",
-                                    "source": "telegram"
-                                },
-                                telegram_id=user.id,
-                                username=user.username
-                            )
-                        except Exception as e:
-                            logger.error(f"Error creating photo order lead: {e}")
-                        
-                        await update.message.reply_text(
-                            f"📸 Отлично! Записали на {photo_date}.\n\n"
-                            "Мы передали вашу заявку в отдел праздников — вам перезвонят! 💚"
-                        )
-                    else:
-                        # Запрос фото — уведомление менеджерам
-                        msg = format_photo_request_message(
-                            platform="telegram",
-                            user_id=user_id,
-                            user_name=user_name,
-                            phone=message_text,
-                            description=photo_data.get("description"),
-                            username=user.username
-                        )
-                        await send_to_managers(msg)
-                        
-                        await update.message.reply_text(
-                            "📷 Спасибо! Мы передали ваш запрос.\n\n"
-                            "Менеджер свяжется с вами по поводу фотографий! 💚"
-                        )
-                    
-                    # Сбрасываем режим
-                    session.intent = "unknown"
-                    session.lead_data = {}
-                    db.commit()
-                    return
-                else:
-                    await update.message.reply_text("📱 Пожалуйста, укажите корректный номер телефона:")
-                    return
-        
-        # Проверяем триггер заказа фотографа (ТОЛЬКО если нет активного бронирования!)
-        # Если есть активный лид — пусть AI-агент обработает как extras
-        if needs_photo_order(message_text):
-            # Проверяем, есть ли у пользователя активное бронирование
-            active_lead_info = get_active_lead_info(user_id)
-            has_active_booking = active_lead_info and active_lead_info.get("event_date")
-            
-            if has_active_booking:
-                # Есть активное бронирование — пропускаем, пусть AI-агент добавит в extras
-                # или обработает через новую логику deal_in_work
-                logger.info(f"Photo order detected but user has active booking, passing to AI agent")
-                pass  # НЕ делаем return — пусть идёт дальше к AI-агенту
-            else:
-                # Нет активного бронирования — самостоятельный флоу фотосессии
-                user_name = user.first_name or "Гость"
-                
-                # Проверяем телефон в CRM
-                phone = None
-                try:
-                    contact = await amocrm_client.find_contact_by_telegram_id(user.id)
-                    if contact:
-                        contact_info_crm = amocrm_client.get_contact_info(contact)
-                        phone = contact_info_crm.get("phone")
-                except Exception as e:
-                    logger.error(f"Error finding contact for photo order: {e}")
-                
-                # Начинаем опрос: сначала дата, потом телефон
-                session.intent = "photo_order"
-                session.lead_data = {
-                    "photo_step": "date",  # Сначала спрашиваем дату
-                    "type": "standalone",  # Самостоятельная фотосессия
-                    "phone": phone  # Если нашли — сохраняем
-                }
-                flag_modified(session, "lead_data")
-                db.commit()
-                
+                logger.error(f"Failed to send image: {e}")
                 await update.message.reply_text(
-                    "📸 Отличная идея! Фотографии получаются яркие и эмоциональные — отличная память!\n\n"
-                    "💰 Стоимость фотографа: 2500₽/час\n\n"
-                    "📅 На какую дату планируете фотосессию?"
+                    result.text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
                 )
-                return
+        else:
+            await update.message.reply_text(
+                result.text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
         
-        # Проверяем триггер запроса фотографий (получение готовых фото)
-        if needs_photo_request(message_text):
-            user_name = user.first_name or "Гость"
-            
-            # Проверяем телефон в CRM
-            phone = None
+        # Уведомляем менеджеров если нужно
+        if result.should_notify_manager and result.manager_message:
             try:
-                contact = await amocrm_client.find_contact_by_telegram_id(user.id)
-                if contact:
-                    contact_info_crm = amocrm_client.get_contact_info(contact)
-                    phone = contact_info_crm.get("phone")
+                if result.manager_channel == "birthday":
+                    await send_to_birthday_channel(result.manager_message)
+                else:
+                    await send_to_managers(result.manager_message)
             except Exception as e:
-                logger.error(f"Error finding contact for photo request: {e}")
-            
-            if phone:
-                # Телефон есть — сразу отправляем уведомление
-                msg = format_photo_request_message(
-                    platform="telegram",
-                    user_id=user_id,
-                    user_name=user_name,
-                    phone=phone,
-                    description=message_text[:200],
-                    username=user.username
-                )
-                await send_to_managers(msg)
+                logger.error(f"Failed to notify managers: {e}")
                 
-                await update.message.reply_text(
-                    "📷 Понимаю, что вы ждёте свои фотографии!\n\n"
-                    "Мы передали ваш запрос, с вами свяжутся в ближайшее время. 💚"
-                )
-            else:
-                # Телефона нет — запрашиваем
-                session.intent = "photo_request"
-                session.lead_data = {"photo_step": "phone", "type": "request", "description": message_text[:200]}
-                flag_modified(session, "lead_data")
-                db.commit()
-                
-                await update.message.reply_text(
-                    "📷 Понимаю, что вы ждёте свои фотографии!\n\n"
-                    "📱 Оставьте ваш номер телефона, чтобы мы могли связаться с вами:"
-                )
-            return
-        # ============ КОНЕЦ ОБРАБОТКИ ФОТОГРАФИЙ ============
-        
-        # ============ ОБРАБОТКА ПРЕДЛОЖЕНИЙ О СОТРУДНИЧЕСТВЕ ============
-        partnership_data = session.lead_data if session.lead_data else {}
-        partnership_step = partnership_data.get("partnership_step")
-        
-        # Если уже в процессе опроса по предложению
-        if partnership_step == "details":
-            # Получили суть предложения, запрашиваем телефон
-            session.lead_data = {
-                "partnership_step": "phone",
-                "proposal_text": message_text[:500]
-            }
-            flag_modified(session, "lead_data")
-            db.commit()
-            
-            await update.message.reply_text(
-                "📝 Отлично, записал!\n\n"
-                "📱 Оставьте, пожалуйста, ваш номер телефона для связи:"
-            )
-            return
-        
-        if partnership_step == "phone":
-            # Проверяем телефон
-            phone_pattern = r'[\d\+\(\)\-\s]{7,}'
-            if re.search(phone_pattern, message_text):
-                # Отправляем уведомление менеджерам
-                msg = format_partnership_message(
-                    platform="telegram",
-                    user_id=user_id,
-                    user_name=user_name,
-                    proposal_text=partnership_data.get("proposal_text", ""),
-                    phone=message_text,
-                    username=user.username
-                )
-                await send_to_managers(msg)
-                
-                # Сбрасываем состояние
-                session.intent = "unknown"
-                session.lead_data = {}
-                db.commit()
-                
-                await update.message.reply_text(
-                    "🤝 Спасибо за ваше предложение!\n\n"
-                    "Мы передали его руководству. С вами свяжутся в ближайшее время! 💚"
-                )
-                return
-            else:
-                await update.message.reply_text("📱 Пожалуйста, укажите корректный номер телефона:")
-                return
-        
-        # Проверяем триггер предложения о сотрудничестве
-        if needs_partnership_proposal(message_text):
-            session.intent = "partnership"
-            session.lead_data = {"partnership_step": "details"}
-            flag_modified(session, "lead_data")
-            db.commit()
-            
-            await update.message.reply_text(
-                "🤝 Здорово, что вы хотите сотрудничать с нами!\n\n"
-                "📝 Расскажите, пожалуйста, подробнее о вашем предложении — в чём его суть?"
-            )
-            return
-        # ============ КОНЕЦ ОБРАБОТКИ ПРЕДЛОЖЕНИЙ ============
-        
-        # ============ КОРОТКИЙ ФЛОУ: ДОПОЛНИТЕЛЬНОЕ БРОНИРОВАНИЕ ============
-        if session.intent == "birthday_additional":
-            lead_data = session.lead_data or {}
-            
-            # Шаг 1: Собираем дату
-            if not lead_data.get("event_date"):
-                extracted = agent.extract_lead_data(message_text, {})
-                if extracted.get("event_date"):
-                    lead_data["event_date"] = extracted["event_date"]
-                    session.lead_data = lead_data
-                    flag_modified(session, "lead_data")
-                    db.commit()
-                    
-                    await update.message.reply_text(
-                        f"📅 Отлично, {extracted['event_date']}!\n\n"
-                        "👶 Сколько детей будет на этом празднике, включая именинника?"
-                    )
-                    return
-                else:
-                    await update.message.reply_text(
-                        "📅 Пожалуйста, укажите дату праздника (например: 15 февраля)"
-                    )
-                    return
-            
-            # Шаг 2: Собираем количество детей → сразу в CRM
-            if not lead_data.get("kids_count"):
-                extracted = agent.extract_lead_data(message_text, lead_data)
-                if extracted.get("kids_count"):
-                    # Берём данные из контекста
-                    phone = context.user_data.get("additional_booking_phone")
-                    name = context.user_data.get("additional_booking_name") or user.first_name
-                    
-                    if not phone:
-                        # Пытаемся найти телефон в CRM
-                        try:
-                            contact = await amocrm_client.find_contact_by_telegram_id(user.id)
-                            if contact:
-                                contact_info = amocrm_client.get_contact_info(contact)
-                                phone = contact_info.get("phone")
-                        except Exception as e:
-                            logger.error(f"Failed to get phone from CRM: {e}")
-                    
-                    if not phone:
-                        # Телефона нет — просим указать
-                        lead_data["kids_count"] = extracted["kids_count"]
-                        lead_data["waiting_phone"] = True
-                        session.lead_data = lead_data
-                        flag_modified(session, "lead_data")
-                        db.commit()
-                        
-                        await update.message.reply_text(
-                            "📱 Укажите номер телефона для связи:"
-                        )
-                        return
-                    
-                    # Создаём новый лид и сразу отправляем в CRM
-                    new_lead = force_create_new_lead(
-                        user_id,
-                        park_id="nn",
-                        username=user.username,
-                        source="telegram"
-                    )
-                    
-                    # removed redundant import
-                    update_lead_from_data(new_lead.id, {
-                        "event_date": lead_data["event_date"],
-                        "kids_count": extracted["kids_count"],
-                        "phone": phone,
-                        "customer_name": name
-                    })
-                    
-                    # Отправляем в AmoCRM
-                    try:
-                        lead_dict = {
-                            "event_date": lead_data["event_date"],
-                            "kids_count": extracted["kids_count"],
-                            "phone": phone,
-                            "customer_name": name,
-                            "source": "telegram"
-                        }
-                        amocrm_deal_id, amocrm_contact_id = await send_lead_to_amocrm(
-                            lead_dict,
-                            telegram_id=user_id,
-                            username=user.username
-                        )
-                        if amocrm_deal_id:
-                            save_amocrm_deal_id(new_lead.id, str(amocrm_deal_id))
-                            if amocrm_contact_id:
-                                save_amocrm_contact_id(new_lead.id, str(amocrm_contact_id))
-                            logger.info(f"Additional booking Lead #{new_lead.id} created in AmoCRM, deal_id={amocrm_deal_id}")
-                        
-                        # Уведомляем менеджеров
-                        msg_text = format_lead_message("telegram", user_id, lead_dict, username=user.username)
-                        await send_to_birthday_channel(msg_text)
-                        mark_lead_sent_to_manager(new_lead.id)
-                    except Exception as e:
-                        logger.error(f"Failed to send additional booking to AmoCRM: {e}")
-                    
-                    # Сбрасываем intent
-                    session.intent = "unknown"
-                    session.lead_data = {}
-                    db.commit()
-                    
-                    # Очищаем context
-                    context.user_data.pop("additional_booking_phone", None)
-                    context.user_data.pop("additional_booking_name", None)
-                    
-                    await update.message.reply_text(
-                        f"✅ Дополнительное бронирование создано!\n\n"
-                        f"📅 Дата: {lead_data['event_date']}\n"
-                        f"👶 Детей: {extracted['kids_count']}\n\n"
-                        "Феи праздников свяжутся с вами для уточнения деталей! 🧚‍♀️💚"
-                    )
-                    return
-                else:
-                    await update.message.reply_text(
-                        "👶 Пожалуйста, укажите количество детей (например: 8 детей)"
-                    )
-                    return
-            
-            # Шаг 3: Если ждём телефон
-            if lead_data.get("waiting_phone"):
-                # Проверяем, похоже ли на телефон
-                phone_pattern = r'[\d\+\(\)\-\s]{7,}'
-                if re.search(phone_pattern, message_text):
-                    phone = message_text.strip()
-                    name = context.user_data.get("additional_booking_name") or user.first_name
-                    
-                    # Создаём лид и отправляем в CRM
-                    new_lead = force_create_new_lead(
-                        user_id,
-                        park_id="nn",
-                        username=user.username,
-                        source="telegram"
-                    )
-                    
-                    # removed redundant import
-                    update_lead_from_data(new_lead.id, {
-                        "event_date": lead_data["event_date"],
-                        "kids_count": lead_data["kids_count"],
-                        "phone": phone,
-                        "customer_name": name
-                    })
-                    
-                    # Отправляем в AmoCRM
-                    try:
-                        lead_dict = {
-                            "event_date": lead_data["event_date"],
-                            "kids_count": lead_data["kids_count"],
-                            "phone": phone,
-                            "customer_name": name,
-                            "source": "telegram"
-                        }
-                        amocrm_deal_id, amocrm_contact_id = await send_lead_to_amocrm(
-                            lead_dict,
-                            telegram_id=user_id,
-                            username=user.username
-                        )
-                        if amocrm_deal_id:
-                            save_amocrm_deal_id(new_lead.id, str(amocrm_deal_id))
-                            if amocrm_contact_id:
-                                save_amocrm_contact_id(new_lead.id, str(amocrm_contact_id))
-                        
-                        msg_text = format_lead_message("telegram", user_id, lead_dict, username=user.username)
-                        await send_to_birthday_channel(msg_text)
-                        mark_lead_sent_to_manager(new_lead.id)
-                    except Exception as e:
-                        logger.error(f"Failed to send additional booking to AmoCRM: {e}")
-                    
-                    # Сбрасываем
-                    session.intent = "unknown"
-                    session.lead_data = {}
-                    db.commit()
-                    
-                    await update.message.reply_text(
-                        f"✅ Дополнительное бронирование создано!\n\n"
-                        f"📅 Дата: {lead_data['event_date']}\n"
-                        f"👶 Детей: {lead_data['kids_count']}\n\n"
-                        "Феи праздников свяжутся с вами! 🧚‍♀️💚"
-                    )
-                    return
-                else:
-                    await update.message.reply_text(
-                        "📱 Пожалуйста, укажите корректный номер телефона:"
-                    )
-                    return
-        # ============ КОНЕЦ КОРОТКОГО ФЛОУ ============
-        
-        # Определяем intent
-
-        current_intent = session.intent
-        intent_result = detect_intent(message_text)
-        
-        # Логика переключения intent
-        if current_intent == "unknown":
-            # Первое определение
-            session.intent = intent_result.intent
-            db.commit()
-            logger.info(f"Intent detected: {intent_result.intent} ({intent_result.confidence})")
-        elif current_intent == "general" and intent_result.intent == "birthday" and intent_result.confidence >= 0.7:
-            # Переключаемся с general на birthday при явных триггерах
-            session.intent = "birthday"
-            session.lead_data = {}  # Сбрасываем данные лида
-            db.commit()
-            logger.info(f"Intent switched: general -> birthday")
-        elif current_intent == "general" and intent_result.intent == "events" and intent_result.confidence >= 0.7:
-            # Переключаемся с general на events при вопросах об афише
-            session.intent = "events"
-            db.commit()
-            logger.info(f"Intent switched: general -> events")
-        elif current_intent == "birthday" and intent_result.intent == "events" and intent_result.confidence >= 0.8:
-            # С birthday на events только при очень явных триггерах
-            session.intent = "events"
-            db.commit()
-            logger.info(f"Intent switched: birthday -> events")
-        
-        # Получаем историю сообщений
-        history = []
-        for msg in db.query(Message).filter(Message.session_id == session.id).order_by(Message.id.desc()).limit(10).all():
-            history.insert(0, {"role": msg.role, "content": msg.content})
-        
-        # Получаем контекст из RAG
-        rag_context = rag.get_context(message_text, session.intent)
-        
-        # Для birthday ветки — сохраняем данные в Lead (надёжно в БД)
-        current_lead = None
-        lead_data = {}
-        
-        if session.intent == "birthday":
-            # Получаем или создаём Lead в БД
-            current_lead = get_or_create_lead(
-                user_id, 
-                source="telegram", 
-                park_id="nn", 
-                username=user.username,
-                first_name=user.first_name,
-                last_name=user.last_name
-            )
-            
-            # Проверяем: есть ли у юзера активная заявка с датой И упоминает ли он новую дату
-            active_lead_info = get_active_lead_info(user_id)
-            if active_lead_info and active_lead_info.get("event_date"):
-                # Проверяем, содержит ли сообщение дату (паттерн: число + месяц)
-                date_pattern = r'\b\d{1,2}\s*(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря|янв|фев|мар|апр|июн|июл|авг|сен|окт|ноя|дек)\b'
-                has_new_date = bool(re.search(date_pattern, message_text.lower()))
-                
-                # Также проверяем не относится ли это к изменению (ключевые слова)
-                is_modification = any(x in message_text.lower() for x in ["изменить", "поменять", "перенести", "другую дату", "сменить"])
-                
-                # Если есть новая дата и нет явного указания на изменение — спрашиваем
-                if has_new_date and not is_modification:
-                    keyboard = [
-                        [InlineKeyboardButton("🔄 Изменить текущую заявку", callback_data="booking_modify")],
-                        [InlineKeyboardButton("➕ Создать новое бронирование", callback_data="booking_new")]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    
-                    existing_date = active_lead_info["event_date"]
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text=f"Вижу, у вас уже есть заявка на {existing_date} 📅\n\nВы хотите изменить эту заявку или создать новое бронирование?",
-                        reply_markup=reply_markup
-                    )
-                    
-                    # Сохраняем новую дату в контексте для последующего использования
-                    context.user_data["pending_new_date"] = message_text
-                    return  # Ждём выбора пользователя
-            
-            # Извлекаем данные из ВСЕЙ истории переписки (не только последнего сообщения)
-            # Это критически важно т.к. имя, телефон, дата могут быть в разных сообщениях
-            current_lead_data = lead_to_dict(current_lead)
-            
-            # Собираем все сообщения пользователя из истории
-            user_messages = [msg["content"] for msg in history if msg["role"] == "user"][-10:]
-            full_conversation = "\n".join(user_messages)
-            
-            extracted = agent.extract_lead_data(full_conversation, current_lead_data)
-            if extracted and "extras" in extracted:
-                last_bot_message = next(
-                    (msg["content"] for msg in reversed(history) if msg["role"] == "assistant"),
-                    ""
-                )
-                filtered_extras = filter_extras_from_message(
-                    message_text,
-                    extracted.get("extras"),
-                    last_bot_message=last_bot_message
-                )
-                if filtered_extras:
-                    extracted["extras"] = filtered_extras
-                else:
-                    extracted.pop("extras", None)
-            
-            # Обновляем Lead в БД
-            if extracted:
-                # Если имя не указано — берём из профиля
-                if not extracted.get("customer_name") and user.first_name:
-                    extracted["customer_name"] = user.first_name
-                
-                current_lead = update_lead_from_data(current_lead.id, extracted)
-                logger.info(f"Lead #{current_lead.id} updated with: {extracted}")
-            
-            # Перечитываем lead из БД чтобы получить актуальные данные (включая телефон)
-            current_lead = db.query(Lead).filter(Lead.id == current_lead.id).first()
-            
-            lead_data = lead_to_dict(current_lead)
-
-            # Если в сообщении есть дата И это НЕ вопрос И дата ещё не сохранена — фиксируем
-            # Защита: не парсим дату из вопросов типа "Это точно понедельник?"
-            is_question = '?' in message_text
-            already_has_date = bool(lead_data.get("event_date"))
-            
-            if not is_question and not already_has_date:
-                parsed_date = parse_user_date(message_text)
-                if parsed_date:
-                    normalized_date = format_date_ru(parsed_date, include_year=False)
-                    current_lead = update_lead_from_data(current_lead.id, {"event_date": normalized_date})
-                    lead_data = lead_to_dict(current_lead)
-                    context.user_data["force_kids"] = True
-                    response_text = build_birthday_date_question(parsed_date)
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text=response_text
-                    )
-                    return
-
-            # Если дата есть, но детей ещё нет (или мы форсим сбор) — пытаемся распарсить число
-            force_kids = context.user_data.get("force_kids")
-            if lead_data.get("event_date") and (force_kids or not lead_data.get("kids_count")):
-                kids_count = parse_kids_count(message_text)
-                if kids_count:
-                    current_lead = update_lead_from_data(current_lead.id, {"kids_count": kids_count})
-                    lead_data = lead_to_dict(current_lead)
-                    context.user_data.pop("force_kids", None)
-
-            # Если дата есть, но детей всё ещё нет — НЕ повторяем шаблонный вопрос!
-            # Пусть AI-агент обработает сообщение (например, ответит на вопрос "В смысле?")
-            # Примечание: шаблонный вопрос о детях уже был задан при получении даты (строки 2317-2329)
-            # Повторять его не нужно — это создаёт ощущение "линейного бота"
-
-            # Если ждём телефон и пользователь прислал его — сохраняем без LLM
-            if lead_data.get("event_date") and lead_data.get("kids_count") and not lead_data.get("phone"):
-                phone_candidate = extract_phone_from_message(message_text)
-                if phone_candidate:
-                    current_lead = update_lead_from_data(current_lead.id, {"phone": phone_candidate})
-                    lead_data = lead_to_dict(current_lead)
-
-            # Если пользователь выбрал формат — фиксируем без LLM
-            if lead_data.get("event_date") and lead_data.get("kids_count"):
-                format_candidate = extract_format_from_message(message_text)
-                if format_candidate and not lead_data.get("format"):
-                    current_lead = update_lead_from_data(current_lead.id, {"format": format_candidate})
-                    lead_data = lead_to_dict(current_lead)
-            
-            # Проверяем: нужно подтвердить телефон для нового бронирования?
-            pending_phone = context.user_data.get("pending_phone_confirm")
-            
-            # Если есть pending телефон И уже получили kids_count — спрашиваем
-            if pending_phone and lead_data.get("kids_count"):
-                keyboard = [
-                    [InlineKeyboardButton(f"✅ Да, использовать {pending_phone}", callback_data="confirm_phone_yes")],
-                    [InlineKeyboardButton("📱 Указать другой номер", callback_data="confirm_phone_no")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=f"📱 Использовать этот номер телефона для бронирования?\n\n{pending_phone}",
-                    reply_markup=reply_markup
-                )
-                return  # Ждём выбора
-            
-            # Если дата и дети уже есть, но телефона нет — AI-агент сам спросит телефон
-            # Убрали жёсткий шаблонный запрос — это делало бота "линейным"
-            # AI-агент знает из контекста что нужен телефон и мягко попросит его
-            
-            # РАННЯЯ ОТПРАВКА В CRM: Как только есть телефон — создаём сделку
-            
-            # Проверяем валидность телефона (минимум 10 цифр)
-            phone = lead_data.get("phone", "")
-            phone_digits = ''.join(filter(str.isdigit, str(phone))) if phone else ""
-            has_valid_phone = len(phone_digits) >= 10
-            
-            logger.info(f"Early CRM check: phone='{phone}', has_valid_phone={has_valid_phone}, amocrm_deal_id={current_lead.amocrm_deal_id}")
-            
-            if has_valid_phone and not current_lead.amocrm_deal_id:
-                # Телефон есть, сделки ещё нет — СОЗДАЁМ!
-                logger.info(f"Phone received! Creating AmoCRM deal for Lead #{current_lead.id}")
-                try:
-                    lead_dict = lead_data.copy()
-                    lead_dict["source"] = "telegram"
-                    lead_dict["first_name"] = user.first_name  # Для имени из профиля
-                    
-                    amocrm_deal_id, amocrm_contact_id = await send_lead_to_amocrm(
-                        lead_dict, 
-                        telegram_id=user_id,
-                        username=user.username
-                    )
-                    if amocrm_deal_id:
-                        # Сохраняем ID сделки и контакта через lead_service (правильная сессия БД)
-                        save_amocrm_deal_id(current_lead.id, str(amocrm_deal_id))
-                        if amocrm_contact_id:
-                            save_amocrm_contact_id(current_lead.id, str(amocrm_contact_id))
-                            current_lead.amocrm_contact_id = str(amocrm_contact_id)
-                        current_lead.amocrm_deal_id = str(amocrm_deal_id)  # Обновляем локальный объект
-                        logger.info(f"Lead #{current_lead.id} created in AmoCRM, deal_id={amocrm_deal_id}, contact_id={amocrm_contact_id}")
-                        
-                        # Добавляем историю переписки в AmoCRM
-                        try:
-                            chat_history_text = "\n".join([
-                                f"{'Клиент' if m['role'] == 'user' else 'Бот'}: {m['content']}"
-                                for m in history
-                            ])
-                            await amocrm_client.add_note(int(amocrm_deal_id), f"📱 История переписки:\n\n{chat_history_text}")
-                        except Exception as ne:
-                            logger.error(f"Failed to add chat history note: {ne}")
-                        
-                        # Отправляем уведомление менеджерам
-                        msg_text = format_lead_message("telegram", user_id, lead_data, username=user.username)
-                        await send_to_birthday_channel(msg_text)
-                        mark_lead_sent_to_manager(current_lead.id)
-                        logger.info(f"Manager notification sent for Lead #{current_lead.id}!")
-                except Exception as e:
-                    logger.error(f"Failed to send to AmoCRM: {e}")
-            
-            elif has_valid_phone and current_lead.amocrm_deal_id:
-                # Телефон есть, сделка уже есть — ОБНОВЛЯЕМ!
-                try:
-                    await amocrm_client.update_deal_fields(
-                        int(current_lead.amocrm_deal_id), 
-                        lead_data
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to update AmoCRM deal: {e}")
-            
-            # Формируем lead_data для передачи в agent (добавляем first_name для имени из профиля)
-            lead_data["first_name"] = user.first_name
-
-            # Убрали жёсткие шаблонные вопросы для формата, времени и имени
-            # AI-агент сам задаст эти вопросы в контексте естественного диалога
-            # Это позволяет отвечать на уточняющие вопросы клиента
-        
-        # Проверяем статус сделки в AmoCRM
-        deal_in_work = False
-        status_just_changed = False
-        
-        if current_lead and current_lead.amocrm_deal_id:
-            try:
-                deal_in_work = await amocrm_client.is_deal_in_work(int(current_lead.amocrm_deal_id))
-                
-                # Если статус изменился и клиент ещё не уведомлён
-                if deal_in_work and not current_lead.status_notified:
-                    status_just_changed = True
-                    mark_status_notified(current_lead.id)
-                    logger.info(f"Lead #{current_lead.id} status changed to 'in work', notifying client")
-            except Exception as e:
-                logger.error(f"Failed to check deal status: {e}")
-        
-        # Показываем индикатор "печатает..."
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        
-        # Если статус только что изменился — сначала уведомляем
-        if status_just_changed:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id, 
-                text="🎉 Отличные новости! Феи праздников уже начали работу над вашим мероприятием! 🧚‍♀️✨"
-            )
-        
-        # Генерируем ответ (передаём флаг deal_in_work)
-        response = agent.generate_response(
-            message=message_text,
-            intent=session.intent,
-            history=history,
-            rag_context=rag_context,
-            lead_data=lead_data,
-            deal_in_work=deal_in_work
-        )
-
-        # Если откладывали запрос телефона — добавляем после ответа
-        if session.intent == "birthday":
-            defer_phone = context.user_data.pop("defer_phone_request", None)
-            if defer_phone and lead_data and not lead_data.get("phone"):
-                if "телефон" not in response.lower() and "номер" not in response.lower():
-                    response += "\n\n📱 Оставьте номер телефона для связи, чтобы мы закрепили бронирование."
-        
-        # Сохраняем ответ
-        assistant_message = Message(session_id=session.id, role="assistant", content=response)
-        db.add(assistant_message)
-        db.commit()
-        
-        # КРИТИЧНО: Извлекаем данные из ОТВЕТА бота и сохраняем сразу
-        # Бот часто суммаризирует данные в своем ответе (например: "Спасибо, Наталья!")
-        # НО НЕ извлекаем extras из ответа бота — иначе слова типа "аниматоры, торты" попадут в заказ!
-        if current_lead and session.intent == "birthday":
-            response_data = agent.extract_lead_data(response, lead_data)
-            if response_data:
-                # Удаляем extras из response_data — они должны извлекаться ТОЛЬКО из сообщений пользователя
-                response_data.pop("extras", None)
-                if response_data:  # Если остались какие-то данные
-                    current_lead = update_lead_from_data(current_lead.id, response_data)
-                    logger.info(f"Lead #{current_lead.id} updated from bot response: {response_data}")
-                # Обновляем lead_data для следующих итераций
-                lead_data = lead_to_dict(current_lead)
-                
-                # Синхронизируем с AmoCRM если сделка уже создана
-                if current_lead.amocrm_deal_id:
-                    try:
-                        await amocrm_client.update_deal_fields(
-                            int(current_lead.amocrm_deal_id), 
-                            lead_data
-                        )
-                        
-                        # Обновляем имя контакта если клиент указал другое имя
-                        if current_lead.amocrm_contact_id and lead_data.get("customer_name"):
-                            await amocrm_client.update_contact_name(
-                                int(current_lead.amocrm_contact_id),
-                                lead_data["customer_name"]
-                            )
-                        
-                        # Обновляем переписку в AmoCRM (добавляем новую заметку)
-                        conversation_lines = []
-                        for msg in history[-20:]:
-                            role_emoji = "👤" if msg["role"] == "user" else "🤖"
-                            conversation_lines.append(f"{role_emoji} {msg['content'][:300]}")
-                        conversation = "\n\n".join(conversation_lines)
-                        await amocrm_client.add_note(
-                            int(current_lead.amocrm_deal_id), 
-                            f"📱 Обновление переписки:\n\n{conversation}"
-                        )
-                        
-                        logger.info(f"AmoCRM deal {current_lead.amocrm_deal_id} synced with new data")
-                    except Exception as e:
-                        logger.error(f"Failed to sync AmoCRM deal: {e}")
-        
-        # Отправляем ответ пользователю (ВСЕГДА)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=response)
-        
-        # Если бот сказал про "передам менеджеру" — создаём задачу в AmoCRM и уведомляем менеджеров
-        if deal_in_work and current_lead and current_lead.amocrm_deal_id:
-            is_change_request = any(x in response.lower() for x in ["передам менеджеру", "перезвонят", "передал вашу просьбу"])
-            if is_change_request:
-                try:
-                    # Создаём задачу в AmoCRM
-                    task_text = f"⚠️ Клиент просит изменения: {message_text[:200]}"
-                    await amocrm_client.create_task(int(current_lead.amocrm_deal_id), task_text)
-                    
-                    # Добавляем заметку в сделку
-                    await amocrm_client.add_note(
-                        int(current_lead.amocrm_deal_id),
-                        f"⚠️ КЛИЕНТ ПРОСИТ ВНЕСТИ ИЗМЕНЕНИЯ:\n\n{message_text}"
-                    )
-                    
-                    # Отправляем уведомление менеджерам в TG
-                    customer_name = lead_data.get("customer_name") or "Клиент"
-                    manager_msg = f"⚠️ *ЗАПРОС НА ИЗМЕНЕНИЕ*\n\n"
-                    manager_msg += f"👤 {customer_name}\n"
-                    manager_msg += f"📱 {lead_data.get('phone', 'нет телефона')}\n\n"
-                    manager_msg += f"💬 Просьба клиента:\n{message_text[:300]}\n\n"
-                    manager_msg += f"🔗 Сделка #{current_lead.amocrm_deal_id}"
-                    await send_to_managers(manager_msg)
-                    
-                    logger.info(f"Created callback task for Lead #{current_lead.id}")
-                except Exception as e:
-                    logger.error(f"Failed to create callback task: {e}")
-            
-            # Проверяем, подтвердил ли бот добавление доп.услуги (extras)
-            # Ищем в ответе бота подтверждение: "оформить?", "добавить?", "заявку передал"
-            extras_confirmation_keywords = [
-                "заявк", "передал", "оформи", "добав", "записал", 
-                "менеджер свяжется", "перезвонят", "уведомил"
-            ]
-            if any(kw in response.lower() for kw in extras_confirmation_keywords):
-                # Определяем тип услуги по сообщению клиента
-                extras_type = get_extras_type(message_text)
-                if extras_type:
-                    try:
-                        # Отправляем уведомление в TG-канал
-                        user_name = lead_data.get("customer_name") or user.first_name or "Клиент"
-                        msg = format_extras_request_message(
-                            platform="telegram",
-                            user_id=user_id,
-                            user_name=user_name,
-                            extras_type=extras_type,
-                            deal_id=current_lead.amocrm_deal_id,
-                            phone=lead_data.get("phone"),
-                            username=user.username,
-                            context=message_text
-                        )
-                        await send_to_managers(msg)
-                        
-                        # Добавляем примечание в AmoCRM
-                        from core.notifications import EXTRAS_TYPES
-                        extras_info = EXTRAS_TYPES.get(extras_type, {"name": extras_type, "emoji": "✨"})
-                        note_text = f"{extras_info['emoji']} КЛИЕНТ ХОЧЕТ ДОБАВИТЬ: {extras_info['name']}\n\n💬 Контекст: {message_text[:300]}"
-                        await amocrm_client.add_note(
-                            int(current_lead.amocrm_deal_id),
-                            note_text
-                        )
-                        
-                        # Создаём задачу на перезвон
-                        task_text = f"📞 Перезвонить: клиент хочет добавить {extras_info['name']}"
-                        await amocrm_client.create_task(int(current_lead.amocrm_deal_id), task_text)
-                        
-                        logger.info(f"Created extras request notification for Lead #{current_lead.id}: {extras_type}")
-                    except Exception as e:
-                        logger.error(f"Failed to create extras notification: {e}")
-        
-        # Проверяем, бот сообщил что заявка принята (для отправки фото)
-        is_confirmation = current_lead and \
-            any(x in response.lower() for x in ["передана феям", "заявка принята", "передал заявку"])
-        
-        if is_confirmation:
-            # "Заявка принята" — отправляем картинку для красоты
-            logger.info(f"Bot announced confirmation for Lead #{current_lead.id} — sending photo!")
-            
-            # НЕ парсим ответ бота! Данные уже собраны ранее.
-            # Это исправляет баг, когда extras извлекались из текста бота
-            # ("аниматоры, торты, шары" упоминались как предложение, а не запрос клиента)
-            
-            # Подсказка про /booking для discoverability
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="💡 *Подсказка:* чтобы проверить статус бронирования в любой момент — напишите /booking",
-                parse_mode="Markdown"
-            )
-
-        
-        # Если intent всё ещё unknown — показываем кнопки
-        if session.intent == "unknown":
-            keyboard = [
-                [InlineKeyboardButton("🎟 Узнать о парке", callback_data="intent_general")],
-                [InlineKeyboardButton("🎉 Организовать праздник", callback_data="intent_birthday")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(
-                "Или выберите, что вас интересует:",
-                reply_markup=reply_markup
-            )
-            
     except Exception as e:
-        # Fallback logging to stdout
-        print(f"CRITICAL EXCEPTION IN HANDLER: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-        
-        try:
-            with open("/root/jungle_bot/crash.log", "a") as f:
-                f.write(f"\nCRASH at {datetime.now()}:\n")
-                traceback.print_exc(file=f)
-        except Exception as log_result:
-            print(f"FAILED TO WRITE LOG: {log_result}", flush=True)
-
-        logger.error(f"Error handling message: {e}")
+        logger.error(f"Error handling message: {e}", exc_info=True)
         await update.message.reply_text(
-            "Ой, ошибка (код 505) 😅\n"
-            "Попробуйте ещё раз или позвоните нам: +7 (831) 213-50-50"
+            "Упс, что-то пошло не так! 😅 Попробуйте ещё раз или напишите /human для связи с менеджером."
         )
-    finally:
-        db.close()
-
-
 async def notify_manager(update: Update, lead, context: ContextTypes.DEFAULT_TYPE):
     """Отправить уведомление менеджеру о новом лиде."""
     if not MANAGER_CHAT_ID:

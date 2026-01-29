@@ -1,10 +1,12 @@
 """Системные промпты для AI агента — оптимизированная версия."""
 
 # Базовый промпт — общий для всех веток
-BASE_SYSTEM_PROMPT = """Ты — Джуси 💚💜, весёлый зверёк — главный герой парка "Джунгли Сити" (Нижний Новгород).
+# Цены и расписание подставляются динамически в get_system_prompt()
+
+BASE_SYSTEM_PROMPT_TEMPLATE = """Ты — Джуси 💚💜, весёлый зверёк — главный герой парка "Джунгли Сити" (Нижний Новгород).
 
 ПАРК: ~3000 м², 40+ аттракционов, 7 комнат для праздников, семейный ресторан.
-Адрес: ул. Коминтерна, 11, ТЦ "Лента", 1 этаж.
+Адрес: {address}
 
 ⚠️ КРИТИЧЕСКИ ВАЖНО — СОПРОВОЖДЕНИЕ ДЕТЕЙ:
 - ВСЕ дети ЛЮБОГО возраста ОБЯЗАТЕЛЬНО должны быть с взрослым 18+
@@ -17,14 +19,12 @@ BASE_SYSTEM_PROMPT = """Ты — Джуси 💚💜, весёлый зверё�
 - 1-2 эмодзи на сообщение
 - ВСЕГДА заканчивай вопросом/предложением
 - НЕ предлагай звонить — отвечай сам!
-- Телефон (+7 831 213-50-50) только если клиент просит
+- Телефон ({phone}) только если клиент просит
 
 ФОРМАТИРОВАНИЕ: Только текст и эмодзи! Без *, _, [], `. Ссылки просто URL.
 
 РЕЖИМ РАБОТЫ:
-- Пн: 12:00-22:00
-- Вт-Вс: 10:00-22:00 (вход до 21:00)
-- Отдел праздников: до 21:00
+{schedule_text}
 
 🔴 КАЛЕНДАРЬ И ЦЕНЫ (ВАЖНО!):
 Ты получаешь текущую дату в формате "СЕГОДНЯ: ДД.ММ.ГГГГ (ДеньНедели)".
@@ -33,17 +33,18 @@ BASE_SYSTEM_PROMPT = """Ты — Джуси 💚💜, весёлый зверё�
    - Если сегодня Суббота, то "завтра" = Воскресенье (ВЫХОДНОЙ тариф!).
 2. ПРОВЕРЬ день недели получившейся даты.
 3. ПРИМЕНИ тариф этого дня недели:
-   - Пн = 1090₽ (или 990₽ как указано в базе)
-   - Вт-Пт = 1190₽
-   - Сб-Вс = 1590₽ (ВЫХОДНОЙ)
-   - Праздники = 1590₽ (ВЫХОДНОЙ)
+   - Пн = {price_monday}₽
+   - Вт-Пт = {price_weekday}₽
+   - Сб-Вс = {price_weekend}₽ (ВЫХОДНОЙ)
+   - Праздники = {price_weekend}₽ (ВЫХОДНОЙ)
 
 ПРИМЕР РАССУЖДЕНИЯ:
 Ввод: "СЕГОДНЯ: 24.01.2026 (Суббота)". Юзер: "Какая цена завтра?"
 Логика: Завтра = 24.01 + 1 день = 25.01.2026. Это ВОСКРЕСЕНЬЕ.
-Вывод: Воскресенье — это выходной тариф 1590₽.
-Ответ: "Завтра у нас выходной день (воскресенье), цена билета 1590₽..."
+Вывод: Воскресенье — это выходной тариф {price_weekend}₽.
+Ответ: "Завтра у нас выходной день (воскресенье), цена билета {price_weekend}₽..."
 """
+
 
 
 # Промпт для ветки "general"
@@ -168,13 +169,62 @@ EVENTS_PROMPT = """
 Если нет инфо о дате в базе знаний — честно скажи и дай ссылку!
 """
 
-from core.utils import get_prices_from_knowledge, get_prices_text
+
+# Импорты перемещены внутрь функций для избежания циклических зависимостей
+
+
+
+def _build_base_prompt() -> str:
+    """Построить базовый промпт с данными из park_config."""
+    try:
+        from config.park_config import load_config
+        config = load_config()
+        
+        park = config.get("park", {})
+        phones = config.get("phones", {})
+        schedule = config.get("schedule", {})
+        prices = config.get("prices", {})
+        
+        address = park.get("address", "ул. Коминтерна, 11, ТЦ «Лента», 1 этаж")
+        phone = phones.get("main", "+7 (831) 213-50-50")
+        
+        # Формируем текст расписания
+        schedule_text = f"""- Пн: {schedule.get('monday', {}).get('open', '12:00')}-{schedule.get('monday', {}).get('close', '22:00')}
+- Вт-Вс: {schedule.get('weekdays', {}).get('open', '10:00')}-{schedule.get('weekdays', {}).get('close', '22:00')} (вход до {schedule.get('entrance_until', '21:00')})
+- Отдел праздников: до {schedule.get('birthday_dept_until', '21:00')}"""
+        
+        price_monday = prices.get("monday", 990)
+        price_weekday = prices.get("weekday", 1190)
+        price_weekend = prices.get("weekend", 1590)
+        
+        return BASE_SYSTEM_PROMPT_TEMPLATE.format(
+            address=address,
+            phone=phone,
+            schedule_text=schedule_text,
+            price_monday=price_monday,
+            price_weekday=price_weekday,
+            price_weekend=price_weekend
+        )
+        
+    except Exception:
+        # Fallback с дефолтными значениями
+        return BASE_SYSTEM_PROMPT_TEMPLATE.format(
+            address="ул. Коминтерна, 11, ТЦ «Лента», 1 этаж",
+            phone="+7 (831) 213-50-50",
+            schedule_text="- Пн: 12:00-22:00\n- Вт-Вс: 10:00-22:00 (вход до 21:00)\n- Отдел праздников: до 21:00",
+            price_monday=990,
+            price_weekday=1190,
+            price_weekend=1590
+        )
+
 
 def get_system_prompt(intent: str, park_id: str = "nn") -> str:
     """
     Получить системный промпт в зависимости от намерения.
     Сначала пытается загрузить из БД, при отсутствии — использует код.
     """
+    # Локальный импорт для избежания циклических зависимостей
+    from core.utils import get_prices_from_knowledge, get_prices_text
     
     prices = get_prices_from_knowledge()
     prices_text = get_prices_text()
@@ -233,8 +283,8 @@ def get_system_prompt(intent: str, park_id: str = "nn") -> str:
         import logging
         logging.getLogger(__name__).warning(f"Failed to load prompts from DB: {e}. Using code fallback.")
     
-    # Fallback: используем промпты из кода
-    base = BASE_SYSTEM_PROMPT + prices_block
+    # Fallback: используем промпты из кода с динамическими данными
+    base = _build_base_prompt() + prices_block
     
     if intent == "birthday":
         return base + BIRTHDAY_PROMPT
@@ -244,3 +294,4 @@ def get_system_prompt(intent: str, park_id: str = "nn") -> str:
         return base + EVENTS_PROMPT
     else:
         return base + CLARIFICATION_PROMPT
+
