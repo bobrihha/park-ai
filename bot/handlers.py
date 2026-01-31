@@ -49,6 +49,16 @@ from core.lead_service import (
 from core.amocrm import send_lead_to_amocrm, amocrm_client
 from core.messages import BIRTHDAY_WELCOME_MESSAGE
 
+# === NEW: Birthday Flow Module ===
+from core.birthday import (
+    handle_birthday_trigger,
+    handle_birthday_message,
+    handle_birthday_callback,
+    is_birthday_flow_active,
+    check_birthday_trigger,
+    is_birthday_callback,
+)
+
 logger = logging.getLogger(__name__)
 
 # Картинки для основных разделов (локальные файлы на сервере)
@@ -509,6 +519,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat_id
     
     try:
+        # === NEW: Birthday Flow Callback Integration ===
+        if is_birthday_callback(query.data):
+            try:
+                result = await handle_birthday_callback(update, context, query.data)
+                if result is True:
+                    db.close()
+                    return
+            except Exception as e:
+                logger.error(f"Birthday callback error: {e}")
+        # === END Birthday Flow Callback Integration ===
+        
         if query.data == "lead_continue":
             # Пользователь решил продолжить текущую заявку
             if session:
@@ -1326,6 +1347,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Получаем lead_data из сессии
         lead_data = session.lead_data or {}
         verified_name = None  # Персонализация отключена
+
+        # === NEW: Birthday Flow Integration ===
+        # Проверяем, активен ли birthday flow для этого пользователя
+        if is_birthday_flow_active(user_id):
+            # Делегируем обработку в новый модуль
+            try:
+                result = await handle_birthday_message(
+                    update, context, message_text
+                )
+                if result is True:
+                    # Сообщение обработано birthday flow
+                    db.close()
+                    return
+            except Exception as e:
+                logger.error(f"Birthday flow error: {e}")
+        
+        # Проверяем триггеры birthday flow
+        if check_birthday_trigger(message_text):
+            try:
+                await handle_birthday_trigger(update, context)
+                db.close()
+                return
+            except Exception as e:
+                logger.error(f"Birthday trigger error: {e}")
+        # === END Birthday Flow Integration ===
 
         # --- НОВАЯ ЛОГИКА: Проверка на ID приложения ---
         # Ищем только если есть явное упоминание "id", "код" и НЕТ признаков телефона

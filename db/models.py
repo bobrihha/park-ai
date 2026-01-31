@@ -128,7 +128,14 @@ class Lead(Base):
     
     # Флаги
     sent_to_manager = Column(Boolean, default=False)
-    status_notified = Column(Boolean, default=False)  # Уведомлен ли клиент о смене статуса на "Взято в работу"
+    status_notified = Column(Boolean, default=False)  # Уведомлен ли клиент о смене статуса на «Взято в работу»
+    
+    # Birthday flow state machine
+    birthday_state = Column(String(30), default="idle")  # idle, ask_date, ask_kids, etc.
+    
+    # VK support
+    vk_id = Column(String(50), index=True)  # VK user ID
+    web_session_id = Column(String(100), index=True)  # Web chat session ID
     
     client = relationship("Client", back_populates="leads")
     
